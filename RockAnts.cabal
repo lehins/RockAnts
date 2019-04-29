@@ -25,6 +25,7 @@ library
                      , massiv          >= 0.3.1
                      , massiv-io
                      , primitive
+                     , mwc-random
                      , rio
                      , scheduler
 

@@ -142,10 +142,10 @@ makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
                 [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
     fillWalls 0 (unSz gridSpecSize - 1)
     A.iforM_ gridSpecNests $ \ix Nest { nestNorthWest = nw
-                                  , nestSize = Sz nestSz
-                                  , nestEntranceStart = start
-                                  , nestEntranceEnd = end
-                                  } -> do
+                                      , nestSize = Sz nestSz
+                                      , nestEntranceStart = start
+                                      , nestEntranceEnd = end
+                                      } -> do
       let sw = nw + nestSz
       fillWalls nw sw
       A.mapM_ (`writeCell` emptyCell) (start ... end)
@@ -172,8 +172,8 @@ fillNests GridSpec {gridSpecSize, gridSpecNests} fillEmpty fillWall fillNest = d
     A.mapM_ fillEmpty (start ... end)
     A.forM_ (nw + 1 ... sw - 1) (fillNest (Cell ix) nest)
 
-makeGridImage :: GridSpec -> GridScale -> Image DL RGB Word8
-makeGridImage gridSpec@GridSpec {gridSpecSize} gridScale =
+makeGridImage :: GridSpec -> CellDrawer -> Image DL RGB Word8
+makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
   makeLoadArrayS imageSize whitePx $ \writePixel -> do
     let writePixelOff e ix = writePixel (ix - csCellOffset cellDrawer) e
         drawWallCell = drawCell cellDrawer (writePixelOff blackPx)
@@ -181,7 +181,6 @@ makeGridImage gridSpec@GridSpec {gridSpecSize} gridScale =
     fillNests gridSpec drawEmptyCell drawWallCell (\_ _ -> drawEmptyCell)
   where
     imageSize = csCellSize cellDrawer * gridSpecSize - Sz (csCellOffset cellDrawer)
-    cellDrawer = getCellDrawer gridScale
     whitePx = maxBound :: Pixel RGB Word8
     blackPx = minBound :: Pixel RGB Word8
 
@@ -191,13 +190,15 @@ makeGrid gridSpec@GridSpec {gridSpecNests} gridScale =
   Grid
     { gridNests = gridSpecNests
     , gridMap = compute $ makeGridMap gridSpec
-    , gridImage = compute $ makeGridImage gridSpec gridScale
+    , gridImage = compute $ makeGridImage gridSpec cellDrawer
     }
+  where
+    cellDrawer = getCellDrawer gridScale
 
 
 drawCell :: Monad m => CellDrawer -> (Ix2 -> m a) -> Ix2 -> m ()
-drawCell CellScaler {..} writePixel ix@(i :. _)
-  | odd i = csDrawCell writePixel (ix * unSz csCellSize + (0 :. 1) * csCellOffset)
+drawCell CellScaler {csCellOffset = _ :. hOffset, ..} writePixel ix@(i :. _)
+  | odd i = csDrawCell writePixel (ix * unSz csCellSize + (0 :. hOffset))
   | otherwise = csDrawCell writePixel (ix * unSz csCellSize)
 
 data Orientation
@@ -225,10 +226,17 @@ data GridSpec = GridSpec
   , gridSpecNests :: !(Array B Ix1 Nest)
   } deriving Show
 
+displayGridImage :: Grid -> IO ()
+displayGridImage = displayImage . zoomWithGridD 128 6 . gridImage
 
+emptyGrid :: Grid
+emptyGrid = makeGrid emptyGridSpec GridScale5x6
 
-testNests :: GridSpec
-testNests =
+emptyGridSpec :: GridSpec
+emptyGridSpec = GridSpec 20 A.empty
+
+testGridSpec :: GridSpec
+testGridSpec =
   GridSpec 20 $
   A.singleton
     Nest

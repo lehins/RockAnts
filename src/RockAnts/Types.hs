@@ -1,20 +1,23 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module RockAnts.Types where
 
+import Data.Coerce
 import Data.Massiv.Array as A
 import Data.Massiv.Array.IO
+import Data.Massiv.Array.Mutable.Atomic
 import Data.Primitive.MutVar
 import Graphics.ColorSpace
 import RIO
-
-
+import System.Random.MWC
 
 -- | -2: wall, -1: empty, n: Nest index
 newtype Cell =
@@ -50,10 +53,11 @@ data Nest = Nest
   , nestEntranceEnd   :: !Ix2
   } deriving (Eq, Show)
 
+type NestIx = Ix1
 
 data IsMoving = Moving | NotMoving
 
-data WorkerStatus
+data WorkerState
   = Passive
     -- | Timesteps before going to OldHome and outside of it.
   | Searching !Int !(Maybe Int)
@@ -61,54 +65,100 @@ data WorkerStatus
   | Assessing !NestIx !Int
     -- | After Assessing takes some time to consider new nest
   | Recruiting !Bool
-    -- | Ant index she is leading
+    -- | Ant index Ix1 is leading
   | TandemLeading !Int
     -- | Ant index she is following
-  | TandemFollowing !Int
+  | TandemFollowing !Ix1
     -- | Ant index she is transporting
   | Transporting !Int
     -- | Transported worker needs to remember what she was doing
-  | Transported !WorkerStatus
+  | Transported !WorkerState
 
-data Worker m = Worker
-  { workerDestination   :: MutVar (PrimState m) Ix2
-  , workerLocation      :: MutVar (PrimState m) Ix2
-  , workerBusy          :: MutVar (PrimState m) WorkerStatus
-  , workerIsMovingBaton :: MutVar (PrimState m) IsMoving
+data AntType
+  = Worker
+  | Brood
+  | Queen
+  deriving (Eq, Show)
+
+data Ant = Ant
+  { antDestination   :: !(IORef (Maybe Ix2))
+  , antLocation      :: !(IORef Ix2)
+  , antState         :: !(IORef WorkerState)
+  , antIsMovingBaton :: !(IORef IsMoving)
+  , antType          :: !AntType
   -- ^ Set to True whenever a worker is: carrying, scouting, tandem leading, being lead
   }
 
-takeWorkerIsMovingBaton :: PrimMonad m => Worker m -> m IsMoving
-takeWorkerIsMovingBaton Worker {workerIsMovingBaton} =
-  atomicModifyMutVar' workerIsMovingBaton $ \ movingBaton -> (movingBaton, Moving)
+-- takeWorkerIsMovingBaton :: PrimMonad m => Worker m -> m IsMoving
+-- takeWorkerIsMovingBaton Worker {workerIsMovingBaton} =
+--   atomicModifyMutVar' workerIsMovingBaton $ \ movingBaton -> (movingBaton, Moving)
 
-data Brood
-
-data Queen
-
-type NestIx = Ix1
-
-data Ant m
-  = AntWorker (Worker m)
-  | AntBrood Brood
-  | AntQueen Queen
-
-data RockAnt = RockAnt
-  { rockAntGridLocation :: MVar Ix2
-  , rockAntInsideNest   :: NestIx
+data Colony = Colony
+  { colonyGrid    :: !(MArray (PrimState IO) P Ix2 Ix1)
+  , colonyAnts    :: !(Array B Ix1 Ant)
+  , colonyWorkers :: !(Array M Ix1 Ant)
+  , colonyGen     :: !(Gen (PrimState IO))
   }
 
-
 data Grid = Grid
-  { gridNests :: Array B NestIx Nest
+  { gridNests :: !(Array B Ix1 Nest)
   -- , gridColony      :: Array B Ix1 (Ant m)
   -- , gridHomeNestIx  :: NestIx
-  , gridMap   :: Array P Ix2 Cell
-  , gridImage :: Image S RGB Word8
+  , gridMap   :: !(Array P Ix2 Cell)
+  , gridImage :: !(Image S RGB Word8)
   -- , gridCurrentAnts :: MArray (PrimState m) P Ix2 Ix1
   -- -- / starts as gridArrayAnts frozen
   -- , gridNextAnts    :: MArray (PrimState m) P Ix2 Ix1
   }
+
+getHomeNest :: Grid -> Nest
+getHomeNest Grid {gridNests} =
+  case gridNests !? 0 of
+    Nothing   -> error "Home nest has not been initialized"
+    Just home -> home
+
+placeAntIn :: MArray (PrimState IO) P Ix2 Ix1 -> Ix2 -> Ix1 -> IO Bool
+placeAntIn grid nestIx antIx = isJust <$> casIntArray grid nestIx (coerce emptyCell) antIx
+
+getNestIndices :: Nest -> Array U Ix1 Ix2
+getNestIndices nest =
+  computeAs U $ flatten (nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1)
+
+newColony :: Seed -> Grid -> Sz1 -> Sz1 -> IO Colony
+newColony colonySeed grid@Grid {gridMap} workerCount broodCount = do
+  colonyGen <- restore colonySeed
+  colonyGrid <- loadArrayS $ A.map clearNestsIndices gridMap
+  antTypes <-
+    concatM 1
+      [ A.replicate Seq workerCount Worker
+      , A.replicate Seq broodCount Brood
+      , A.replicate Seq queenCount Queen :: Array D Ix1 AntType
+      ]
+  let homeIndices = getNestIndices (getHomeNest grid)
+      getAvailableSpotFor antIx = do
+        i <- uniformR (0, unSz (size homeIndices) - 1) colonyGen
+        ix <- indexM homeIndices i
+        placed <- placeAntIn colonyGrid ix antIx
+        if placed
+          then pure ix
+          else getAvailableSpotFor antIx
+      initAnt antIx antType = do
+        antDestination <- newIORef Nothing
+        locIx <- getAvailableSpotFor antIx
+        antLocation <- newIORef locIx
+        antState <- newIORef Passive
+        antIsMovingBaton <- newIORef NotMoving
+        pure Ant {..}
+  colonyAnts <- itraversePrim initAnt $ computeAs B antTypes
+  colonyWorkers <- extractM 0 workerCount colonyAnts
+  pure Colony {..}
+  where
+    queenCount = 1
+    clearNestsIndices (Cell ix) =
+      if ix >= 0
+        then 0
+        else ix
+
 
 -- Each ant:to:ant interaction should be:
 --  * Check for expected state
@@ -155,11 +205,6 @@ data Grid = Grid
 --  1. Make a step towards the leader
 --  2. If leader is in the nearby cell, release her baton
 
-
--- data Cell
---   = Ant RockAnt
---   | Wall
---   | Empty
 
 
 -- Facts:
