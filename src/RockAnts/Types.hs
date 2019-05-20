@@ -1,9 +1,11 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -14,10 +16,11 @@ import Data.Coerce
 import Data.Massiv.Array as A
 import Data.Massiv.Array.IO
 import Data.Massiv.Array.Mutable.Atomic
-import Data.Primitive.MutVar
 import Graphics.ColorSpace
 import RIO
+import RIO.Set as Set
 import System.Random.MWC
+import RockAnts.Random
 
 -- | -2: wall, -1: empty, n: Nest index
 newtype Cell =
@@ -44,7 +47,8 @@ instance Show Cell where
     | otherwise = show ix
 
 data Nest = Nest
-  { nestScore         :: !Float
+  { nestIx            :: !Ix1
+  , nestScore         :: !Float
   , nestSize          :: !Sz2
     -- ^ Overall size of the nest
   , nestNorthWest     :: !Ix2
@@ -53,14 +57,22 @@ data Nest = Nest
   , nestEntranceEnd   :: !Ix2
   } deriving (Eq, Show)
 
+nestEntranceRange :: Nest -> Array D Ix1 Ix2
+nestEntranceRange Nest {nestEntranceStart, nestEntranceEnd} =
+  flatten (nestEntranceStart ... nestEntranceEnd)
+
+
 type NestIx = Ix1
 
-data IsMoving = Moving | NotMoving
 
-data WorkerState
-  = Passive
-    -- | Timesteps before going to OldHome and outside of it.
-  | Searching !Int !(Maybe Int)
+data Walk = Walk
+  { walkDirection :: !Double
+  , walkStepsLeft :: !Int
+  }
+
+data Task
+  = -- | Timesteps before going to OldHome and outside of it.
+  Searching !Int !(Maybe Int) !Walk
     -- | Number of steps left to evaluate a nest
   | Assessing !NestIx !Int
     -- | After Assessing takes some time to consider new nest
@@ -72,7 +84,21 @@ data WorkerState
     -- | Ant index she is transporting
   | Transporting !Int
     -- | Transported worker needs to remember what she was doing
-  | Transported !WorkerState
+  | Transported !Task
+  | Passive
+
+getWalk :: Task -> Maybe Walk
+getWalk = \case
+  Searching _ _ walk -> Just walk
+  _                  -> Nothing
+
+stateTask :: State -> Task
+stateTask (Idle task) = task
+stateTask (Busy task) = task
+
+data State =
+    Idle !Task
+  | Busy !Task
 
 data AntType
   = Worker
@@ -81,73 +107,117 @@ data AntType
   deriving (Eq, Show)
 
 data Ant = Ant
-  { antDestination   :: !(IORef (Maybe Ix2))
-  , antLocation      :: !(IORef Ix2)
-  , antState         :: !(IORef WorkerState)
-  , antIsMovingBaton :: !(IORef IsMoving)
-  , antType          :: !AntType
-  -- ^ Set to True whenever a worker is: carrying, scouting, tandem leading, being lead
+  { antIx          :: !Ix1
+  , antDestination :: !(IORef (Maybe Ix2))
+  , antLocation    :: !(IORef Ix2)
+  , antState       :: !(IORef State)
+  , antType        :: !AntType
+  , antDiscovered  :: !(Set NestIx)
   }
-
--- takeWorkerIsMovingBaton :: PrimMonad m => Worker m -> m IsMoving
--- takeWorkerIsMovingBaton Worker {workerIsMovingBaton} =
---   atomicModifyMutVar' workerIsMovingBaton $ \ movingBaton -> (movingBaton, Moving)
 
 data Colony = Colony
   { colonyGrid    :: !(MArray (PrimState IO) P Ix2 Ix1)
   , colonyAnts    :: !(Array B Ix1 Ant)
   , colonyWorkers :: !(Array M Ix1 Ant)
-  , colonyGen     :: !(Gen (PrimState IO))
+  }
+
+data CellDrawer = CellScaler
+  { csCellSize   :: !Sz2
+  , csCellOffset :: !Ix2
+  , csDrawCell   :: forall m a. Monad m => (Ix2 -> m a) -> Ix2 -> m ()
   }
 
 data Grid = Grid
-  { gridNests :: !(Array B Ix1 Nest)
-  -- , gridColony      :: Array B Ix1 (Ant m)
-  -- , gridHomeNestIx  :: NestIx
-  , gridMap   :: !(Array P Ix2 Cell)
-  , gridImage :: !(Image S RGB Word8)
-  -- , gridCurrentAnts :: MArray (PrimState m) P Ix2 Ix1
-  -- -- / starts as gridArrayAnts frozen
-  -- , gridNextAnts    :: MArray (PrimState m) P Ix2 Ix1
+  { gridNests      :: !(Array B Ix1 Nest)
+  , gridMap        :: !(Array P Ix2 Cell)
+  , gridImage      :: !(Image S RGB Word8)
+  , gridCellDrawer :: !CellDrawer
   }
 
-getHomeNest :: Grid -> Nest
-getHomeNest Grid {gridNests} =
-  case gridNests !? 0 of
-    Nothing   -> error "Home nest has not been initialized"
-    Just home -> home
 
-placeAntIn :: MArray (PrimState IO) P Ix2 Ix1 -> Ix2 -> Ix1 -> IO Bool
-placeAntIn grid nestIx antIx = isJust <$> casIntArray grid nestIx (coerce emptyCell) antIx
+data Env = Env
+  { envColony  :: !Colony
+  -- ^ Live representatives of a colony. This is the mutable part of the environment
+  , envGrid    :: !Grid
+  -- ^ The immutable part of the environment. A grid with a map of non-moving elements
+  -- such as walls of nests, as well as a way to draw on it.
+  , envLogFunc :: !LogFunc
+  , envGen     :: !(Gen (PrimState IO))
+  }
+
+instance HasGen Env where
+  genG = to envGen
+
+homeNest :: Grid -> Nest
+homeNest Grid {gridNests} =
+  fromMaybe (error "Home nest has not been initialized") (gridNests !? 0)
+
+placeAntInCell :: PrimMonad m => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m Bool
+placeAntInCell grid cellIx antIx = isJust <$> casIntArray grid cellIx (coerce emptyCell) antIx
 
 getNestIndices :: Nest -> Array U Ix1 Ix2
 getNestIndices nest =
   computeAs U $ flatten (nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1)
 
-newColony :: Seed -> Grid -> Sz1 -> Sz1 -> IO Colony
-newColony colonySeed grid@Grid {gridMap} workerCount broodCount = do
-  colonyGen <- restore colonySeed
+
+data GridScale
+  = GridScale2x2
+  | GridScale3x4
+  | GridScale5x6
+  deriving (Eq, Show)
+
+data GridSpec = GridSpec
+  { gridSpecSize  :: !Sz2
+  , gridSpecScale :: !GridScale
+  , gridSpecNests :: !(Array B Ix1 Nest)
+  } deriving Show
+
+data Config = Config
+  { configSeed      :: !Seed
+  , configGridSpec  :: !GridSpec
+  , configWorkers   :: !Sz1
+  , configBrood     :: !Sz1
+  , configSteps     :: !(Maybe Int)
+  -- ^ Number of steps to terminate simulation after if a new nest doesn't get found
+  , configVerbose   :: !Bool
+  , configConstants :: !Constants
+  }
+
+data Constants = Constants
+  { constPpm :: Double -- ^ Probability a Passive ant moves
+  , constWms :: !Int -- ^ Random walk max steps
+  , constMav :: !Double -- ^ Movement angle variance
+  , constAts :: Int -- ^ Assess for time steps
+  , constPap :: Double
+  -- ^ Probability an ant becomes Passive after assessment. Takes nest's score into
+  -- account as well
+  }
+
+
+newColony :: Gen (PrimState IO) -> Grid -> Sz1 -> Sz1 -> IO Colony
+newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
   colonyGrid <- loadArrayS $ A.map clearNestsIndices gridMap
   antTypes <-
-    concatM 1
+    concatM
+      1
       [ A.replicate Seq workerCount Worker
       , A.replicate Seq broodCount Brood
       , A.replicate Seq queenCount Queen :: Array D Ix1 AntType
       ]
-  let homeIndices = getNestIndices (getHomeNest grid)
+  let homeIndices = getNestIndices (homeNest grid)
       getAvailableSpotFor antIx = do
-        i <- uniformR (0, unSz (size homeIndices) - 1) colonyGen
+        i <- uniformR (0, unSz (A.size homeIndices) - 1) colonyGen
         ix <- indexM homeIndices i
-        placed <- placeAntIn colonyGrid ix antIx
+        placed <- placeAntInCell colonyGrid ix antIx
         if placed
           then pure ix
           else getAvailableSpotFor antIx
+      antDiscovered = Set.singleton 0
       initAnt antIx antType = do
         antDestination <- newIORef Nothing
         locIx <- getAvailableSpotFor antIx
         antLocation <- newIORef locIx
-        antState <- newIORef Passive
-        antIsMovingBaton <- newIORef NotMoving
+        antState <- newIORef $ Idle Passive
         pure Ant {..}
   colonyAnts <- itraversePrim initAnt $ computeAs B antTypes
   colonyWorkers <- extractM 0 workerCount colonyAnts
@@ -158,6 +228,7 @@ newColony colonySeed grid@Grid {gridMap} workerCount broodCount = do
       if ix >= 0
         then 0
         else ix
+
 
 
 -- Each ant:to:ant interaction should be:

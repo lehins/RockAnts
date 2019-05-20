@@ -6,10 +6,8 @@
 {-# LANGUAGE RecordWildCards #-}
 module RockAnts.Grid where
 
-import Control.Scheduler
 import Data.Massiv.Array as A
 import Data.Massiv.Array.IO
-import Data.Massiv.Array.Unsafe as A
 import Graphics.ColorSpace
 import RIO as P
 import RockAnts.Types
@@ -122,14 +120,57 @@ drawCell7x6 w (i0 :. j0) =
 --     !j6 = j0 + 6
 -- {-# INLINE drawCell6x7 #-}
 
+to2piRange :: Double -> Double
+to2piRange !phi
+  | phi <  0   = to2piRange (phi + pi2)
+  | phi >= pi2 = to2piRange (phi - pi2)
+  | otherwise  = phi
 
-data GridScale
-  = GridScale2x2
-  | GridScale3x4
-  | GridScale5x6
+pi2 :: Double
+pi2 = pi * 2
 
+sqrt3 :: Double
+sqrt3 = sqrt 3
 
+destinationToDirection :: Ix2 -> Ix2 -> Maybe Double
+destinationToDirection ix0@(i0 :. j0) ix1@(i1 :. j1)
+  | ix0 == ix1 = Nothing
+  | otherwise = Just $ to2piRange $ adjust + atan phi
+  where
+    !i' = fromIntegral (i1 - i0)
+    !j' = fromIntegral (j1 - j0)
+    !adjust =
+      if j' < 0
+        then pi
+        else 0
+    !phi
+      | even i0 && odd i1 = (i' * sqrt3 + sqrt3 / 2) / (j' * 3 / 2)
+      | odd i0 && even i1 = (i' * sqrt3 - sqrt3 / 2) / (j' * 3 / 2)
+      | otherwise = i' * sqrt3 / (j' * (3 / 2))
 
+cellInDirection :: Ix2 -> Double -> Ix2
+cellInDirection ix@(i :. j) phi
+  | odd i = oddCell
+  | otherwise = evenCell
+  where
+    oddCell
+      | phi < 0 = cellInDirection ix $ to2piRange phi
+      | phi < pi / 3 = i :. j + 1
+      | phi < 2 * pi / 3 = i + 1 :. j
+      | phi < pi = i :. j - 1
+      | phi < 4 * pi / 3 = i - 1 :. j - 1
+      | phi < 5 * pi / 3 = i - 1 :. j
+      | phi < pi2 = i - 1 :. j + 1
+      | otherwise = cellInDirection ix $ to2piRange phi
+    evenCell
+      | phi < 0 = cellInDirection ix $ to2piRange phi
+      | phi < pi / 3 = i + 1 :. j + 1
+      | phi < (2 * pi) / 3 = i + 1 :. j
+      | phi < pi = i + 1 :. j - 1
+      | phi < (4 * pi) / 3 = i :. j - 1
+      | phi < (5 * pi) / 3 = i - 1 :. j
+      | phi < pi2 = i :. j + 1
+      | otherwise = cellInDirection ix $ to2piRange phi
 
 makeGridMap :: GridSpec -> Array DL Ix2 Cell
 makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
@@ -141,16 +182,11 @@ makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
                 (A.mapM_ (`writeCell` wallCell))
                 [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
     fillWalls 0 (unSz gridSpecSize - 1)
-    A.iforM_ gridSpecNests $ \ix Nest { nestNorthWest = nw
-                                      , nestSize = Sz nestSz
-                                      , nestEntranceStart = start
-                                      , nestEntranceEnd = end
-                                      } -> do
+    A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
       let sw = nw + nestSz
       fillWalls nw sw
-      A.mapM_ (`writeCell` emptyCell) (start ... end)
+      A.mapM_ (`writeCell` emptyCell) (nestEntranceRange nest)
       A.forM_ (nw + 1 ... sw - 1) (`writeCell` Cell ix)
-
 
 fillNests ::
      Monad m => GridSpec -> (Ix2 -> m ()) -> (Ix2 -> m ()) -> (Cell -> Nest -> Ix2 -> m ()) -> m ()
@@ -162,22 +198,17 @@ fillNests GridSpec {gridSpecSize, gridSpecNests} fillEmpty fillWall fillNest = d
               (A.mapM_ fillWall)
               [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
   fillWalls 0 (unSz gridSpecSize - 1)
-  A.iforM_ gridSpecNests $ \ix nest@Nest { nestNorthWest = nw
-                                         , nestSize = Sz nestSz
-                                         , nestEntranceStart = start
-                                         , nestEntranceEnd = end
-                                         } -> do
+  A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
     let sw = nw + nestSz
     fillWalls nw sw
-    A.mapM_ fillEmpty (start ... end)
+    A.mapM_ fillEmpty (nestEntranceRange nest)
     A.forM_ (nw + 1 ... sw - 1) (fillNest (Cell ix) nest)
 
 makeGridImage :: GridSpec -> CellDrawer -> Image DL RGB Word8
 makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
   makeLoadArrayS imageSize whitePx $ \writePixel -> do
-    let writePixelOff e ix = writePixel (ix - csCellOffset cellDrawer) e
-        drawWallCell = drawCell cellDrawer (writePixelOff blackPx)
-        drawEmptyCell = drawCell cellDrawer (writePixelOff whitePx)
+    let drawWallCell = drawCell cellDrawer (`writePixel` blackPx)
+        drawEmptyCell = drawCell cellDrawer (`writePixel` whitePx)
     fillNests gridSpec drawEmptyCell drawWallCell (\_ _ -> drawEmptyCell)
   where
     imageSize = csCellSize cellDrawer * gridSpecSize - Sz (csCellOffset cellDrawer)
@@ -185,32 +216,28 @@ makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
     blackPx = minBound :: Pixel RGB Word8
 
 
-makeGrid :: GridSpec -> GridScale -> Grid
-makeGrid gridSpec@GridSpec {gridSpecNests} gridScale =
+makeGrid :: GridSpec -> Grid
+makeGrid gridSpec@GridSpec {gridSpecNests, gridSpecScale} =
   Grid
     { gridNests = gridSpecNests
     , gridMap = compute $ makeGridMap gridSpec
     , gridImage = compute $ makeGridImage gridSpec cellDrawer
+    , gridCellDrawer = cellDrawer
     }
   where
-    cellDrawer = getCellDrawer gridScale
+    cellDrawer = getCellDrawer gridSpecScale
 
 
 drawCell :: Monad m => CellDrawer -> (Ix2 -> m a) -> Ix2 -> m ()
-drawCell CellScaler {csCellOffset = _ :. hOffset, ..} writePixel ix@(i :. _)
-  | odd i = csDrawCell writePixel (ix * unSz csCellSize + (0 :. hOffset))
-  | otherwise = csDrawCell writePixel (ix * unSz csCellSize)
+drawCell CellScaler {csCellOffset = csCellOffset@(vOffset :. _), ..} writePixel ix@(i :. _)
+  | odd i = csDrawCell writePixel (ix * unSz csCellSize - (vOffset :. 0))
+  | otherwise = csDrawCell writePixel (ix * unSz csCellSize - csCellOffset)
 
 data Orientation
   = Horizontal
   | Vertical
   deriving (Eq, Show)
 
-data CellDrawer = CellScaler
-  { csCellSize   :: !Sz2
-  , csCellOffset :: !Ix2
-  , csDrawCell   :: forall m a. Monad m => (Ix2 -> m a) -> Ix2 -> m ()
-  }
 
 getCellDrawer :: GridScale -> CellDrawer
 getCellDrawer gridScale =
@@ -221,31 +248,8 @@ getCellDrawer gridScale =
 
 
 
-data GridSpec = GridSpec
-  { gridSpecSize  :: !Sz2
-  , gridSpecNests :: !(Array B Ix1 Nest)
-  } deriving Show
-
 displayGridImage :: Grid -> IO ()
 displayGridImage = displayImage . zoomWithGridD 128 6 . gridImage
-
-emptyGrid :: Grid
-emptyGrid = makeGrid emptyGridSpec GridScale5x6
-
-emptyGridSpec :: GridSpec
-emptyGridSpec = GridSpec 20 A.empty
-
-testGridSpec :: GridSpec
-testGridSpec =
-  GridSpec 20 $
-  A.singleton
-    Nest
-      { nestScore = 0
-      , nestNorthWest = 2 :. 2
-      , nestSize = 10
-      , nestEntranceStart = 4 :. 12
-      , nestEntranceEnd = 6 :. 12
-      }
 
 
 -- | Scale the array, create an array with a grid.
@@ -259,6 +263,40 @@ zoomWithGridD gridVal zoomFactor arr = A.makeArray (getComp arr) sz' getNewElt
       if i `mod` k == 0 || j `mod` k == 0
         then gridVal
         else arr ! ((i - 1) `div` k :. (j - 1) `div` k)
+
+getAntColor :: MonadIO m => Ant -> m (Pixel RGB Word8)
+getAntColor Ant {antType, antState} = do
+  state <- readIORef antState
+  pure $
+    case antType of
+      Queen -> PixelRGB 255 000 000 -- Red
+      Brood -> PixelRGB 100 100 100 -- Gray
+      Worker ->
+        case stateTask state of
+          Passive               -> PixelRGB 000 000 255 -- Blue
+          Searching _ Nothing _ -> PixelRGB 153 000 000 -- Dark Red
+          Searching _ Just {} _ -> PixelRGB 000 153 000 -- Green
+          Assessing _ _         -> PixelRGB 102 102 000 -- Dark Yellow
+          Recruiting _          -> PixelRGB 000 153 153 -- Dark Cyan
+          TandemLeading _       -> PixelRGB 153 000 153 -- Dark Purple
+          TandemFollowing _     -> PixelRGB 255 051 255 -- Light Purple
+          Transporting _        -> PixelRGB 255 128 000 -- Orange
+          Transported _         -> PixelRGB 000 102 000 -- Dark Green
+
+
+makeColonyImage :: RIO Env (Image S RGB Word8)
+makeColonyImage = do
+  env <- ask
+  let Grid{gridImage, gridCellDrawer} = envGrid env
+      Colony {colonyAnts} = envColony env
+  withMArray gridImage $ \_ _ image ->
+    -- parallelizable
+    A.forM_ colonyAnts $ \ant@Ant {antLocation} -> do
+      color <- getAntColor ant
+      ix <- readIORef antLocation
+      drawCell gridCellDrawer (\i -> write' image i color) ix
+
+
 
 -- -- | Scale the array, create an array with a grid.
 -- zoomWithGridDL :: Source r Ix2 e => e -> Int -> Array r Ix2 e -> Array DL Ix2 e

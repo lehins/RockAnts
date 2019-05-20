@@ -22,5 +22,32 @@ src
 
 # Stage 1
 
-Write a function that will create an image with a grid of hexagonal cells.
+Create a grid from nests and grid spec
 
+# Stage 2
+
+* Abstract the same pattern as in previous stage
+
+* Drawing different hexagons
+
+* Write cellDrawer that will create an image with a grid of hexagonal cells.
+
+# Stage 3
+
+* Draw a grid on the image.
+
+* Write `zoomWithGridD` and `zoomWithGrid`
+
+# Stage 4
+
+* Initialize colony
+
+* Draw colony on the grid image
+
+# Stage 5
+
+* Make a worker move
+
+# Stage 6
+
+* create a cycle and produce an animation
