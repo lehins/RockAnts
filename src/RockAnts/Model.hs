@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -56,22 +58,78 @@ moveInDirection :: Ant -> Double -> RIO Env Double
 moveInDirection ant@Ant {..} direction = do
   currentLocation <- readIORef antLocation
   -- Cell index where an attempt to move will happen.
-  let cellIx = cellInDirection currentLocation direction
-  grid <- colonyGrid . envColony <$> ask
-  hasMoved <- placeAntInCell grid cellIx antIx
+  let targetLocation = cellInDirection currentLocation direction
+  Colony {colonyGrid, colonyAnts} <- envColony <$> ask
+  hasMoved <- placeAntInCell colonyGrid targetLocation antIx
   if hasMoved
-    then direction <$ writeIORef antLocation cellIx
-    else read' grid cellIx >>= \case
-           occupant
-             | Cell occupant == wallCell -> adjustDirection
-             | Cell occupant == emptyCell -> moveInDirection ant direction
+    then direction <$ writeIORef antLocation targetLocation
+    else read' colonyGrid targetLocation >>= \case
+           occupantIx
+             | Cell occupantIx == wallCell -> adjustDirection
+             | Cell occupantIx == emptyCell -> moveInDirection ant direction
              | otherwise -> do
-               tryToSwapWith ant occupant
-               pure direction
+               occupant <- indexM colonyAnts occupantIx
+               hasSwapped <- tryToSwapWith ant currentLocation occupant targetLocation
+               if hasSwapped
+                 then pure direction
+                 else adjustDirection
 
 adjustDirection = undefined
 
-tryToSwapWith = undefined
+setAntBusy Ant {antState} =
+  atomicModifyIORef' antState $ \case
+    Idle task -> (Busy task, Idle task)
+    state -> (state, state)
+
+withAntTask :: MonadIO m => Ant -> (Task -> m (Task, a)) -> m (Maybe a)
+withAntTask Ant {antState} f = do
+  state <- atomicModifyIORef' antState $ \case
+    Idle task -> (Busy task, Idle task)
+    state -> (state, state)
+  case state of
+    Idle task -> do
+      (newTask, res) <- f task
+      writeIORef antState (Idle newTask)
+      pure $ Just res
+    _ -> pure Nothing
+
+withAntTask' :: MonadIO m => Ant -> (Task -> m a) -> m (Maybe a)
+withAntTask' ant f = withAntTask ant f'
+  where
+    f' task = (task, ) <$> f task
+
+withAntTask_ :: MonadIO m => Ant -> (Task -> m Task) -> m Bool
+withAntTask_ ant f =
+  isJust <$> withAntTask ant f'
+  where
+    f' task = (, ()) <$> f task
+
+replaceAntInCell :: PrimMonad m => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> Ix1 ->m Bool
+replaceAntInCell grid cellIx otherAntIx antIx = isJust <$> casIntArray grid cellIx otherAntIx antIx
+
+
+tryToSwapWith :: Ant -> Ix2 -> Ant -> Ix2 -> RIO Env Bool
+tryToSwapWith ant currentLocation otherAnt targetLocation =
+  setAntBusy otherAnt >>= \case
+    state@(Idle _) -> do
+      otherAntLocation <- readIORef $ antLocation otherAnt
+      -- make sure it is still the same other ant
+      res <- if otherAntLocation == targetLocation
+        then do
+          Colony {colonyGrid} <- envColony <$> ask
+          unlessM (replaceAntInCell colonyGrid targetLocation (antIx otherAnt) (antIx ant)) $
+            logError "Couldn't place an ant into a cell while swapping"
+          writeIORef (antLocation ant) targetLocation
+          unlessM (replaceAntInCell colonyGrid targetLocation (antIx ant) (antIx otherAnt)) $
+            logError "Couldn't place another ant into the original cell while swapping"
+          writeIORef (antLocation otherAnt) currentLocation
+          pure True
+        else pure False
+      writeIORef (antState otherAnt) state
+      pure res
+    _ -> pure False
+
+
 
 --randomWalk ant@Ant {..} = undefined
 

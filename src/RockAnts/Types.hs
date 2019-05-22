@@ -148,6 +148,9 @@ data Env = Env
 instance HasGen Env where
   genG = to envGen
 
+instance HasLogFunc Env where
+  logFuncL = lens envLogFunc (\ e f -> e { envLogFunc = f })
+
 homeNest :: Grid -> Nest
 homeNest Grid {gridNests} =
   fromMaybe (error "Home nest has not been initialized") (gridNests !? 0)
