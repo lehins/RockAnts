@@ -135,42 +135,41 @@ sqrt3 = sqrt 3
 destinationToDirection :: Ix2 -> Ix2 -> Maybe Double
 destinationToDirection ix0@(i0 :. j0) ix1@(i1 :. j1)
   | ix0 == ix1 = Nothing
-  | otherwise = Just $ to2piRange $ adjust + atan phi
+  | otherwise = Just $ to2piRange $ adjust + atan ratio
   where
     !i' = fromIntegral (i1 - i0)
     !j' = fromIntegral (j1 - j0)
     !adjust =
-      if j' < 0
-        then pi
-        else 0
-    !phi
-      | even i0 && odd i1 = (i' * sqrt3 + sqrt3 / 2) / (j' * 3 / 2)
-      | odd i0 && even i1 = (i' * sqrt3 - sqrt3 / 2) / (j' * 3 / 2)
-      | otherwise = i' * sqrt3 / (j' * (3 / 2))
+      if i' < 0
+        then pi / 2
+        else -pi / 2
+    !ratio
+      | even i0 && odd i1 = (j' * sqrt3 + sqrt3 / 2) / (i' * 3 / 2)
+      | odd i0 && even i1 = (j' * sqrt3 - sqrt3 / 2) / (i' * 3 / 2)
+      | otherwise = j' * sqrt3 / (i' * (3 / 2))
 
 cellInDirection :: Ix2 -> Double -> Ix2
-cellInDirection ix@(i :. j) phi
+cellInDirection ix@(i :. j) phi'
+  | phi < -pi / 6 = cellInDirection ix $ to2piRange phi'
+  | phi < pi / 6 = i :. j + 1
   | odd i = oddCell
   | otherwise = evenCell
   where
+    phi = phi' - pi / 6
     oddCell
-      | phi < 0 = cellInDirection ix $ to2piRange phi
-      | phi < pi / 3 = i :. j + 1
-      | phi < 2 * pi / 3 = i + 1 :. j
-      | phi < pi = i :. j - 1
-      | phi < 4 * pi / 3 = i - 1 :. j - 1
-      | phi < 5 * pi / 3 = i - 1 :. j
-      | phi < pi2 = i - 1 :. j + 1
-      | otherwise = cellInDirection ix $ to2piRange phi
+      | phi < 3 * pi / 6 = i - 1 :. j + 1
+      | phi < 5 * pi / 6 = i - 1 :. j
+      | phi < 7 * pi / 6 = i :. j - 1
+      | phi < 9 * pi / 6 = i + 1 :. j
+      | phi < 11 * pi / 6 = i + 1 :. j + 1
+      | otherwise = cellInDirection ix $ to2piRange phi'
     evenCell
-      | phi < 0 = cellInDirection ix $ to2piRange phi
-      | phi < pi / 3 = i + 1 :. j + 1
-      | phi < (2 * pi) / 3 = i + 1 :. j
-      | phi < pi = i + 1 :. j - 1
-      | phi < (4 * pi) / 3 = i :. j - 1
-      | phi < (5 * pi) / 3 = i - 1 :. j
-      | phi < pi2 = i :. j + 1
-      | otherwise = cellInDirection ix $ to2piRange phi
+      | phi < 3 * pi / 6 = i - 1 :. j
+      | phi < 5 * pi / 6 = i - 1 :. j - 1
+      | phi < 7 * pi / 6 = i :. j - 1
+      | phi < 9 * pi / 6 = i + 1 :. j - 1
+      | phi < 11 * pi / 6 = i + 1 :. j
+      | otherwise = cellInDirection ix $ to2piRange phi'
 
 makeGridMap :: GridSpec -> Array DL Ix2 Cell
 makeGridMap GridSpec {gridSpecSize, gridSpecNests} =

@@ -1,6 +1,6 @@
 module Main where
 
-import Lib
+import RockAnts.Run
 
 main :: IO ()
-main = someFunc
+main = runTest

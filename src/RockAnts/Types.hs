@@ -19,8 +19,8 @@ import Data.Massiv.Array.Mutable.Atomic
 import Graphics.ColorSpace
 import RIO
 import RIO.Set as Set
-import System.Random.MWC
 import RockAnts.Random
+import System.Random.MWC
 
 -- | -2: wall, -1: empty, n: Nest index
 newtype Cell =
@@ -136,13 +136,14 @@ data Grid = Grid
 
 
 data Env = Env
-  { envColony  :: !Colony
+  { envColony    :: !Colony
   -- ^ Live representatives of a colony. This is the mutable part of the environment
-  , envGrid    :: !Grid
+  , envGrid      :: !Grid
   -- ^ The immutable part of the environment. A grid with a map of non-moving elements
   -- such as walls of nests, as well as a way to draw on it.
-  , envLogFunc :: !LogFunc
-  , envGen     :: !(Gen (PrimState IO))
+  , envLogFunc   :: !LogFunc
+  , envGen       :: !(Gen (PrimState IO))
+  , envConstants :: !Constants
   }
 
 instance HasGen Env where
@@ -155,8 +156,20 @@ homeNest :: Grid -> Nest
 homeNest Grid {gridNests} =
   fromMaybe (error "Home nest has not been initialized") (gridNests !? 0)
 
-placeAntInCell :: PrimMonad m => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m Bool
-placeAntInCell grid cellIx antIx = isJust <$> casIntArray grid cellIx (coerce emptyCell) antIx
+data PlaceResult
+  = HasPlaced
+  | HitWall
+  | HasOccupant Ix1
+
+placeAntInCell ::
+     (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m PlaceResult
+placeAntInCell grid cellIx antIx =
+  casIntArray grid cellIx (coerce emptyCell) antIx >>= \case
+    Nothing -> throwString $
+               "Should not attempt to write into out of bounds cell: " <> show cellIx
+    Just prevIx | Cell prevIx == emptyCell -> pure HasPlaced
+                | Cell prevIx == wallCell -> pure HitWall
+                | otherwise -> pure $ HasOccupant prevIx
 
 getNestIndices :: Nest -> Array U Ix1 Ix2
 getNestIndices nest =
@@ -184,16 +197,19 @@ data Config = Config
   -- ^ Number of steps to terminate simulation after if a new nest doesn't get found
   , configVerbose   :: !Bool
   , configConstants :: !Constants
+  , configMaxSteps  :: !Int
+  -- ^ What is the maximum number of steps to run the model for until consider run as failed
   }
 
 data Constants = Constants
-  { constPpm :: Double -- ^ Probability a Passive ant moves
-  , constWms :: !Int -- ^ Random walk max steps
-  , constMav :: !Double -- ^ Movement angle variance
-  , constAts :: Int -- ^ Assess for time steps
-  , constPap :: Double
+  { constPpm      :: !Double -- ^ Probability a Passive ant moves
+  , constWms      :: !Int -- ^ Random walk max steps
+  , constMav      :: !Double -- ^ Movement angle variance
+  , constAts      :: !Int -- ^ Assess for time steps
+  , constPap      :: !Double
   -- ^ Probability an ant becomes Passive after assessment. Takes nest's score into
   -- account as well
+  , constMaxSteps :: !Int
   }
 
 
@@ -208,13 +224,13 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
       , A.replicate Seq queenCount Queen :: Array D Ix1 AntType
       ]
   let homeIndices = getNestIndices (homeNest grid)
+      -- if home is smaller than number of ants, this will loop forever
       getAvailableSpotFor antIx = do
         i <- uniformR (0, unSz (A.size homeIndices) - 1) colonyGen
         ix <- indexM homeIndices i
-        placed <- placeAntInCell colonyGrid ix antIx
-        if placed
-          then pure ix
-          else getAvailableSpotFor antIx
+        placeAntInCell colonyGrid ix antIx >>= \case
+          HasPlaced -> pure ix
+          _ -> getAvailableSpotFor antIx
       antDiscovered = Set.singleton 0
       initAnt antIx antType = do
         antDestination <- newIORef Nothing
@@ -229,7 +245,7 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
     queenCount = 1
     clearNestsIndices (Cell ix) =
       if ix >= 0
-        then 0
+        then coerce emptyCell
         else ix
 
 

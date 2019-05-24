@@ -15,3 +15,9 @@ randomElement arr
       gen <- view genG
       ix <- uniformR (0, unSz (size arr)) gen
       pure $ evaluateM arr ix
+
+-- | Generates an angle inradians in range @[0, 2*pi)@ as `Double`
+randomDirection :: HasGen env => RIO env Double
+randomDirection = do
+  gen <- view genG
+  subtract (2**(-53)) <$> uniformR (0, 2 * pi) gen
