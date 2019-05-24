@@ -1,10 +1,11 @@
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ViewPatterns #-}
 module LibSpec (spec) where
 
 import Common
-import RockAnts.Grid
 import Data.Massiv.Array as A
+import RockAnts.Grid
+import RockAnts.Types
 
 spec :: Spec
 spec = do
@@ -21,5 +22,7 @@ spec = do
          in forAll dixGen $ \dix ->
               let cell = ix + dix
                   {- adjust for Double imprecision -}
-               in fmap ((cellInDirection ix) . (+ 0.000001)) (destinationToDirection ix cell) ===
+               in fmap
+                    ((cellInDirection ix) . (+ 0.000001) . walkDirection)
+                    (destinationToWalk ix cell) ===
                   Just cell

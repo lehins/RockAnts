@@ -1,19 +1,19 @@
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 
 module RockAnts.Model where
 
-
+import Data.Coerce
 import Data.Massiv.Array as A
 import Data.Massiv.Array.Mutable.Atomic
 import RIO as P
 import RockAnts.Grid
-import RockAnts.Types
 import RockAnts.Random
+import RockAnts.Types
 import System.Random.MWC
 
 getHomeNest :: RIO Env Nest
@@ -27,28 +27,32 @@ chooseDestination Ant {antDestination} arr = randomElement arr >>= writeIORef an
 searchOutside :: Ant -> Walk -> RIO Env Walk
 searchOutside ant@Ant {..} walk = go
   where
-    go = do
-      logDebug "Searching outside"
-      mDestination <- readIORef antDestination
-      case mDestination of
-        Just destination -> do
-          currentLocation <- readIORef antLocation
-          case destinationToDirection currentLocation destination of
-            Nothing -> do
-              writeIORef antDestination Nothing
-              go
-            Just direction -> walk <$ moveInDirection ant direction
-        Nothing -> do
-          Grid {gridNests, gridMap} <- envGrid <$> ask
-          gridIx <- readIORef antLocation
-          case gridMap !? gridIx >>= lookupNest gridNests of
-            Nothing -> do
-              Walk {..} <- maybeChangeWalkDirection walk
-              adjustedDirection <- moveInDirection ant walkDirection
-              pure Walk {walkStepsLeft = walkStepsLeft - 1, walkDirection = adjustedDirection}
-            Just nest -> do
-              chooseDestination ant $ nestEntranceRange nest
-              go
+    go
+      | walkStepsLeft walk > 0 = do
+        adjustedDirection <- moveInDirection ant (walkDirection walk)
+        pure Walk {walkStepsLeft = walkStepsLeft walk - 1, walkDirection = adjustedDirection}
+      | otherwise =
+        readIORef antDestination >>= \case
+          Just destination -> do
+            currentLocation <- readIORef antLocation
+            case destinationToWalk currentLocation destination of
+              Nothing -> do
+                writeIORef antDestination Nothing
+                go
+              Just destinationWalk -> do
+                writeIORef antDestination Nothing
+                searchOutside ant destinationWalk
+          Nothing -> do
+            Grid {gridNests, gridMap} <- envGrid <$> ask
+            gridIx <- readIORef antLocation
+            case gridMap !? gridIx >>= lookupNest gridNests of
+              Nothing -> do
+                Walk {..} <- maybeChangeWalkDirection walk
+                adjustedDirection <- moveInDirection ant walkDirection
+                pure Walk {walkStepsLeft = walkStepsLeft - 1, walkDirection = adjustedDirection}
+              Just nest -> do
+                chooseDestination ant $ nestEntranceRange nest
+                go
 
 maybeChangeWalkDirection :: Walk -> RIO Env Walk
 maybeChangeWalkDirection walk@Walk {..}
@@ -58,6 +62,13 @@ maybeChangeWalkDirection walk@Walk {..}
     Env {envGen, envConstants} <- ask
     numSteps <- uniformR (0, constMaxSteps envConstants) envGen -- (0, maxSteps]
     pure Walk {walkDirection = newDirection, walkStepsLeft = numSteps}
+
+
+clearCell :: Ix2 -> RIO Env ()
+clearCell cellIx = do
+  Colony {colonyGrid} <- envColony <$> ask
+  void $ atomicWriteIntArray colonyGrid cellIx (coerce emptyCell)
+
 
 moveInDirection :: Ant -> Double -> RIO Env Double
 moveInDirection ant@Ant {..} direction = do
@@ -69,22 +80,29 @@ moveInDirection ant@Ant {..} direction = do
   placeAntInCell colonyGrid targetLocation antIx >>= \case
     HasPlaced -> do
       logDebug $ display antIx <> " has moved into cell " <> displayShow targetLocation
-      direction <$ writeIORef antLocation targetLocation -- TODO: adjust direction due to pi/3 movement
-    HitWall -> adjustDirection direction >>= moveInDirection ant
+      clearCell currentLocation
+      writeIORef antLocation targetLocation -- TODO: adjust direction due to pi/3 movement
+      addDirectionDelta direction
+    HitWall -> randomTurn direction >>= moveInDirection ant
     HasOccupant occupantIx -> do
       occupant <- indexM colonyAnts occupantIx
       hasSwapped <- tryToSwapWith ant currentLocation occupant targetLocation
       if hasSwapped
-        then pure direction
-        else adjustDirection direction >>= moveInDirection ant
+        then addDirectionDelta direction
+        else randomTurn direction >>= moveInDirection ant
 
-adjustDirection :: Double -> RIO Env Double
-adjustDirection direction = do
+addDirectionDelta :: Double -> RIO Env Double
+addDirectionDelta direction = do
+  delta <- uniformExclusive (-pi/12, pi/12)
+  pure (direction + delta)
+
+randomTurn :: Double -> RIO Env Double
+randomTurn direction = do
   Env {envGen} <- ask
   turnLeft <- uniform envGen
   pure $
     if turnLeft
-      then direction + pi / 3
+      then direction + (pi / 3 + pi / 216) -- Rock ants are slightly left biased
       else direction - pi / 3
 
 withAntTask :: MonadIO m => Ant -> (Task -> m (Task, a)) -> m (Maybe a)
@@ -116,8 +134,13 @@ withAnt ant f = withAntTask ant f'
     f' task = (task, ) <$> f
 
 
-replaceAntInCell :: PrimMonad m => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> Ix1 -> m Bool
-replaceAntInCell grid cellIx otherAntIx antIx = isJust <$> casIntArray grid cellIx otherAntIx antIx
+replaceAntInCell ::
+     (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> Ix1 -> m Bool
+replaceAntInCell grid cellIx otherAntIx antIx =
+  casIntArray grid cellIx otherAntIx antIx >>= \case
+    Just prevIx -> pure (prevIx == otherAntIx)
+    Nothing ->
+      throwString $ "Impossible: Indexing out of bounds should not have happened: " <> show cellIx
 
 
 tryToSwapWith :: Ant -> Ix2 -> Ant -> Ix2 -> RIO Env Bool

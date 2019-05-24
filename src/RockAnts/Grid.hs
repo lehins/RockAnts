@@ -122,20 +122,22 @@ drawCell7x6 w (i0 :. j0) =
 
 to2piRange :: Double -> Double
 to2piRange !phi
-  | phi <  0   = to2piRange (phi + pi2)
-  | phi >= pi2 = to2piRange (phi - pi2)
-  | otherwise  = phi
-
-pi2 :: Double
-pi2 = pi * 2
+  | phi < 0 = to2piRange (phi + 2 * pi)
+  | phi >= 2 * pi = to2piRange (phi - 2 * pi)
+  | otherwise = phi
 
 sqrt3 :: Double
 sqrt3 = sqrt 3
 
-destinationToDirection :: Ix2 -> Ix2 -> Maybe Double
-destinationToDirection ix0@(i0 :. j0) ix1@(i1 :. j1)
+destinationToWalk :: Ix2 -> Ix2 -> Maybe Walk
+destinationToWalk ix0@(i0 :. j0) ix1@(i1 :. j1)
   | ix0 == ix1 = Nothing
-  | otherwise = Just $ to2piRange $ adjust + atan ratio
+  | otherwise =
+    Just
+      Walk
+        { walkStepsLeft = abs (i1 - i0) + abs (j1 - j0)
+        , walkDirection = to2piRange $ adjust + atan ratio
+        }
   where
     !i' = fromIntegral (i1 - i0)
     !j' = fromIntegral (j1 - j0)

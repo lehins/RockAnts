@@ -21,3 +21,8 @@ randomDirection :: HasGen env => RIO env Double
 randomDirection = do
   gen <- view genG
   subtract (2**(-53)) <$> uniformR (0, 2 * pi) gen
+
+uniformExclusive :: HasGen env => (Double, Double) -> RIO env Double
+uniformExclusive (x, y) = do
+  gen <- view genG
+  uniformR (x, y - 2 ** (-53)) gen

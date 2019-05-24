@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards #-}
 module RockAnts.Run where
@@ -26,7 +27,7 @@ newEnv Config {..} envLogFunc = do
 
 testGridSpec :: GridSpec
 testGridSpec =
-  GridSpec 20 GridScale2x2 $
+  GridSpec (Sz2 200 300) GridScale3x4 $
   A.singleton
     Nest
       { nestIx = 0
@@ -42,8 +43,8 @@ testConfig =
   Config
     { configSeed = seed
     , configGridSpec = testGridSpec
-    , configWorkers = 5
-    , configBrood = 2
+    , configWorkers = 50
+    , configBrood = 20
     , configSteps = Just 3
     , configVerbose = True
     , configConstants =
@@ -55,7 +56,7 @@ testConfig =
           , constPap = 0
           , constMaxSteps = 20
           }
-    , configMaxSteps = 29
+    , configMaxSteps = 1500
     }
 
 runTest :: IO ()
@@ -69,6 +70,8 @@ runTest = do
       void $ tryIO $ removeDirectoryRecursive "output"
       createDirectoryIfMissing True "output"
       runModel 0
+      iGrid <- freeze Seq (colonyGrid (envColony env))
+      logDebug $ displayShow iGrid
   where
     config = testConfig
     maxNumSteps = configMaxSteps config
@@ -76,10 +79,10 @@ runTest = do
     runModel i
       | i < maxNumSteps = do
         img <- makeColonyImage
-          --liftIO $ displayImage $ computeAs S $ zoomWithGrid 128 (Stride 12) i
         let path = printf ("output/step_%0" <> show maxNumLen <> "d.png") i
-        liftIO $ writeImage path $ computeAs S $ zoomWithGrid 128 (Stride 12) img
+        liftIO $ writeImage path img -- $ computeAs S $ zoomWithGrid 128 (Stride 12) img
         colonyStep
+        logSticky $ "Step: " <> display i <> "/" <> display maxNumSteps
         runModel (i + 1)
       | otherwise = pure ()
 
