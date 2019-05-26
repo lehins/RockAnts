@@ -12,17 +12,21 @@ randomElement :: (HasGen env, Source r Ix1 e) => Array r Ix1 e -> RIO env (Maybe
 randomElement arr
   | A.isEmpty arr = pure Nothing
   | otherwise = do
-      gen <- view genG
-      ix <- uniformR (0, unSz (size arr)) gen
+      ix <- uniformRange (0, unSz (size arr) - 1)
       pure $ evaluateM arr ix
 
 -- | Generates an angle inradians in range @[0, 2*pi)@ as `Double`
 randomDirection :: HasGen env => RIO env Double
-randomDirection = do
-  gen <- view genG
-  subtract (2**(-53)) <$> uniformR (0, 2 * pi) gen
+randomDirection = subtract (2 ** (-53)) <$> uniformRange (0, 2 * pi)
 
 uniformExclusive :: HasGen env => (Double, Double) -> RIO env Double
-uniformExclusive (x, y) = do
+uniformExclusive (x, y) = uniformRange (x, y - 2 ** (-53))
+
+uniformRandom :: (Variate a, HasGen env) => RIO env a
+uniformRandom = view genG >>= uniform
+
+-- | For integral types range is inclusive, for floating point numbers range is: (a, b]
+uniformRange :: (Variate a, HasGen env) => (a, a) -> RIO env a
+uniformRange r = do
   gen <- view genG
-  uniformR (x, y - 2 ** (-53)) gen
+  uniformR r gen

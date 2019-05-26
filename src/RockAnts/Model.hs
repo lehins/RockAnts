@@ -7,21 +7,69 @@
 
 module RockAnts.Model where
 
+import Data.Foldable as F
 import Data.Coerce
 import Data.Massiv.Array as A
 import Data.Massiv.Array.Mutable.Atomic
 import RIO as P
+import RIO.Set as Set
 import RockAnts.Grid
 import RockAnts.Random
 import RockAnts.Types
-import System.Random.MWC
-
-getHomeNest :: RIO Env Nest
-getHomeNest = homeNest . envGrid <$> ask
 
 chooseDestination :: (HasGen env, Source r Ix1 Ix2) => Ant -> Array r Ix1 Ix2 -> RIO env ()
 chooseDestination Ant {antDestination} arr = randomElement arr >>= writeIORef antDestination
 
+
+
+walkInside :: Ant -> Walk -> Nest -> RIO Env Walk
+walkInside ant@Ant {..} walk nest = go
+  where
+    go
+      | walkStepsLeft walk > 0 = do
+        adjustedDirection <- moveInDirection ant (walkDirection walk)
+        pure Walk {walkStepsLeft = walkStepsLeft walk - 1, walkDirection = adjustedDirection}
+      | otherwise =
+        readIORef antDestination >>= \case
+          Just destination -> do
+            currentLocation <- readIORef antLocation
+            case destinationToWalk currentLocation destination of
+              Nothing -> do
+                writeIORef antDestination Nothing
+                go
+              Just destinationWalk -> do
+                writeIORef antDestination Nothing
+                walkInside ant destinationWalk nest
+          Nothing -> do
+            gridIx <- readIORef antLocation
+            Grid {gridMap} <- envGrid <$> ask
+            cell <- gridMap !? gridIx
+            if cell == Cell (nestIx nest)
+              then do
+                Walk {..} <- changeWalkDirection walk
+                adjustedDirection <- moveInDirection ant walkDirection
+                pure Walk {walkStepsLeft = walkStepsLeft - 1, walkDirection = adjustedDirection}
+              else do
+                chooseDestination ant $ nestEntranceRange nest
+                go
+
+nestEntranceDestination :: HasGen env => Nest -> RIO env Ix2
+nestEntranceDestination nest =
+  fromMaybe (error "Impossible: empty nest entrance") <$> randomElement (nestEntranceRange nest)
+
+goOutside :: Ant -> Nest -> RIO Env ()
+goOutside ant@Ant {..} nest = do
+  currentLocation <- readIORef antLocation
+  destination <-
+    readIORef antDestination >>= \case
+      Just destination -> pure destination
+      Nothing -> do
+        destination <- nestEntranceDestination nest
+        writeIORef antDestination $ Just destination
+        pure destination
+  case destinationToWalk currentLocation destination of
+    Nothing -> writeIORef antDestination Nothing
+    Just destinationWalk -> void $ moveInDirection ant (walkDirection destinationWalk)
 
 
 searchOutside :: Ant -> Walk -> RIO Env Walk
@@ -46,28 +94,24 @@ searchOutside ant@Ant {..} walk = go
             Grid {gridNests, gridMap} <- envGrid <$> ask
             gridIx <- readIORef antLocation
             case gridMap !? gridIx >>= lookupNest gridNests of
-              Nothing -> do
-                Walk {..} <- maybeChangeWalkDirection walk
-                adjustedDirection <- moveInDirection ant walkDirection
-                pure Walk {walkStepsLeft = walkStepsLeft - 1, walkDirection = adjustedDirection}
+              Nothing -> searchOutside ant =<< changeWalkDirection walk
               Just nest -> do
                 chooseDestination ant $ nestEntranceRange nest
                 go
 
-maybeChangeWalkDirection :: Walk -> RIO Env Walk
-maybeChangeWalkDirection walk@Walk {..}
-  | walkStepsLeft > 0 = pure walk
-  | otherwise = do
-    newDirection <- randomDirection
-    Env {envGen, envConstants} <- ask
-    numSteps <- uniformR (0, constMaxSteps envConstants) envGen -- (0, maxSteps]
-    pure Walk {walkDirection = newDirection, walkStepsLeft = numSteps}
+changeWalkDirection :: Walk -> RIO Env Walk
+changeWalkDirection Walk {..} = do
+  newDirection <- randomDirection -- [0, 2*pi)
+  Env {envConstants} <- ask
+  numSteps <- uniformRange (1, constMaxSteps envConstants) -- [1, maxSteps]
+  pure Walk {walkDirection = newDirection, walkStepsLeft = numSteps}
 
 
 clearCell :: Ix2 -> RIO Env ()
 clearCell cellIx = do
   Colony {colonyGrid} <- envColony <$> ask
-  void $ atomicWriteIntArray colonyGrid cellIx (coerce emptyCell)
+  unlessM (atomicWriteIntArray colonyGrid cellIx (coerce emptyCell)) $
+    throwString $ "Impossible: attempt to clear a cell out of bounds: " <> show cellIx
 
 
 moveInDirection :: Ant -> Double -> RIO Env Double
@@ -81,11 +125,11 @@ moveInDirection ant@Ant {..} direction = do
     HasPlaced -> do
       logDebug $ display antIx <> " has moved into cell " <> displayShow targetLocation
       clearCell currentLocation
-      writeIORef antLocation targetLocation -- TODO: adjust direction due to pi/3 movement
+      writeIORef antLocation targetLocation
       addDirectionDelta direction
     HitWall -> randomTurn direction >>= moveInDirection ant
     HasOccupant occupantIx -> do
-      occupant <- indexM colonyAnts occupantIx
+      occupant <- colonyAnts !? occupantIx
       hasSwapped <- tryToSwapWith ant currentLocation occupant targetLocation
       if hasSwapped
         then addDirectionDelta direction
@@ -98,8 +142,7 @@ addDirectionDelta direction = do
 
 randomTurn :: Double -> RIO Env Double
 randomTurn direction = do
-  Env {envGen} <- ask
-  turnLeft <- uniform envGen
+  turnLeft <- uniformRandom
   pure $
     if turnLeft
       then direction + (pi / 3 + pi / 216) -- Rock ants are slightly left biased
@@ -133,6 +176,30 @@ withAnt ant f = withAntTask ant f'
   where
     f' task = (task, ) <$> f
 
+withAntAt :: Ix2 -> (Ant -> Task -> RIO Env (Maybe (Task, a))) -> RIO Env (Maybe a)
+withAntAt ix f = do
+  Colony {colonyGrid, colonyAnts} <- envColony <$> ask
+  mAntIx <- read' colonyGrid ix
+  case colonyAnts !? mAntIx of
+    Nothing -> pure Nothing
+    Just ant@Ant {antLocation} -> do
+      mRes <-
+        withAntTask ant $ \task -> do
+          ix' <- readIORef antLocation
+          if ix == ix'
+            then f ant task >>= \case
+                   Nothing -> pure (task, Nothing)
+                   Just (newTask, a) -> pure (newTask, Just a)
+            else pure (task, Nothing)
+      pure $ join mRes
+
+forNeighbors :: Ant -> (Ant -> Task -> RIO Env (Maybe (Task, a))) -> RIO Env (Maybe a)
+forNeighbors Ant{antLocation} f = do
+  ix <- readIORef antLocation
+  foldM action Nothing $ cellNeighbors ix
+  where
+    action mAnt@Just {} _ = pure mAnt
+    action Nothing cellIx = withAntAt cellIx f
 
 replaceAntInCell ::
      (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> Ix1 -> m Bool
@@ -149,8 +216,10 @@ tryToSwapWith ant currentLocation otherAnt targetLocation =
   where
     swapAnts = do
       otherAntLocation <- readIORef $ antLocation otherAnt
+      -- try swapping only 50% of the time
+      shouldSwap <- uniformRandom
       -- make sure it is still the same "other" ant that we expect
-      if otherAntLocation == targetLocation
+      if otherAntLocation == targetLocation && shouldSwap
         then do
           logDebug $
             "swapping ants: " <> display (antIx otherAnt) <> " and " <> display (antIx ant)
@@ -164,35 +233,132 @@ tryToSwapWith ant currentLocation otherAnt targetLocation =
           pure True
         else pure False
 
+isInsideNest :: Ant -> RIO Env (Maybe Nest)
+isInsideNest Ant{antLocation} = do
+  gridIx <- readIORef antLocation
+  Grid {gridMap, gridNests} <- envGrid <$> ask
+  cell <- gridMap !? gridIx
+  pure $ lookupNest gridNests cell
+
+startAssessing :: Nest -> Task
+startAssessing nest@Nest {nestSize} = Assessing nest (AssessStepsLeft n) (Walk 0 0)
+  where
+    n = totalElem nestSize `div` 20
+
+startConsidering :: Nest -> Task
+startConsidering nest@Nest {nestSize, nestQuality} = Assessing nest (ConsiderStepsLeft k) (Walk 0 0)
+  where
+    k = totalElem nestSize `div` round (100 * nestQuality)
+
+hasDiscovered :: MonadIO m => Ant -> Nest -> m Bool
+hasDiscovered Ant {antDiscovered} Nest {nestIx} = do
+  discoveredSet <- readIORef antDiscovered
+  pure (nestIx `Set.member` discoveredSet)
+
+startRecruiting :: Ant -> RIO Env Task
+startRecruiting Ant {antDiscovered} = do
+  discoveredSet <- readIORef antDiscovered
+  Grid {gridNests} <- envGrid <$> ask
+  discoveredNests <- P.mapM (indexM gridNests) $ F.toList discoveredSet
+  let nest = F.maximumBy (\n1 n2 -> compare (nestQuality n1) (nestQuality n2)) discoveredNests
+  pure $ Recruiting nest (Walk 0 0)
 
 
---randomWalk ant@Ant {..} = undefined
-
--- -- | A random walk, which is something like a Brownian motion in 2D, but oversimplified.
--- randomWalk ant@(Ant { wDirection = dir }) =
---   forM (getWalk task) $ \ Walk {..} -> do
---     if isJust dir && momentum > 0 && aHasMoved ant
---       then do err <- uniformExclusiveR rGen (-mav, mav)
---               return $ (setDirection conf ant (direction + err) (momentum - 1)) {
---                 wNextPriority = priority }
---       else do
---       constants <- configConstants <$> ask
---       momentum' <- uniformR (cMmr $ constants conf) rGen
---               direction' <- (2*pi*) <$> uniform' rGen -- [0, 2pi)
---               return $ (setDirection conf ant direction' momentum') {
---                 wNextPriority = priority }
-
-
--- walkInsideNest ant@Ant{..} Nest {..} = do
---   undefined
+recruitAnt :: Ant -> Ant -> Task -> Maybe (Task, Ant)
+recruitAnt leaderAnt followerAnt =
+  let following = (TandemFollowing leaderAnt, followerAnt)
+   in \case
+        Searching {} -> Just following
+        HangingAtHome {} -> Just following
+        Recruiting {} -> Just following
+        _ -> Nothing
 
 performTask :: Ant -> Task -> RIO Env Task
-performTask ant@Ant {..} =
+performTask ant =
   \case
-    (Searching n m walk) ->
+    Searching n walk ->
+      isInsideNest ant >>= \case
+        Nothing
+          | n > 0 -> Searching (n - 1) <$> searchOutside ant walk
+        Nothing -> do
+          let hangAtHomeMaxSteps = 200
+          k <- uniformRange (10, hangAtHomeMaxSteps)
+          homeNest <- askHomeNest
+          HangingAtHome k <$> walkInside ant (Walk 0 0) homeNest
+        Just nest -> do
+          known <- hasDiscovered ant nest
+          if known
+            then Searching n <$> searchOutside ant walk
+            else pure $ startAssessing nest
+    HangingAtHome k walk -> do
+      homeNest <- askHomeNest
+      isInsideNest ant >>= \case
+        Nothing
+          | k > 0 -> HangingAtHome k <$> walkInside ant walk homeNest
+        Nothing -> do
+          let searchMaxSteps = 1000
+          n <- uniformRange (500, searchMaxSteps)
+          Searching n <$> searchOutside ant (Walk 0 0)
+        Just nest
+          | nestIx nest == nestIx homeNest ->
+            if k > 0
+              then HangingAtHome (k - 1) <$> walkInside ant walk homeNest
+              else HangingAtHome k walk <$ goOutside ant nest
+        Just nest -> do
+          known <- hasDiscovered ant nest
+          if known
+            then HangingAtHome k walk <$ goOutside ant nest
+            else pure $ startAssessing nest
+    Assessing nest (AssessStepsLeft n) walk ->
+      isInsideNest ant >>= \case
+        Nothing -> Assessing nest (AssessStepsLeft n) <$> walkInside ant walk nest
+        Just nest'
+          | nestIx nest' == nestIx nest ->
+            if n > 0
+              then Assessing nest (AssessStepsLeft (n - 1)) <$> walkInside ant walk nest
+              else startConsidering nest <$
+                   modifyIORef' (antDiscovered ant) (Set.insert (nestIx nest))
+        Just nest' -> goOutside ant nest' $> Assessing nest (AssessStepsLeft n) walk
+    Assessing nest (ConsiderStepsLeft n) walk ->
       if n > 0
-        then Searching (n - 1) m <$> searchOutside ant walk
-        else Searching 20 m <$> searchOutside ant walk --getHomeNest >>= walkInsideNest ant
+        then Assessing nest (ConsiderStepsLeft (n - 1)) <$> walkInside ant walk nest
+        else startRecruiting ant
+    Recruiting nest walk ->
+      forNeighbors ant (\nAnt task -> pure (recruitAnt ant nAnt task)) >>= \case
+        Just followerAnt -> pure $ TandemLeading nest (antIx followerAnt) (Walk 0 0)
+        Nothing -> do
+          homeNest <- askHomeNest
+          Recruiting nest <$> walkInside ant walk homeNest
+    TandemLeading nest fAntIx walk -> do
+      mNewTask <-
+        forNeighbors ant $ \nAnt task ->
+          if antIx nAnt == fAntIx
+            then isInsideNest ant >>= \case
+                   Nothing -> do
+                     walk' <- walkInside ant walk nest
+                     pure $ Just (task, TandemLeading nest fAntIx walk')
+                   Just nest'
+                     | nestIx nest' == nestIx nest ->
+                       if walkStepsLeft walk > 0
+                         then do
+                           walk' <- walkInside ant walk nest
+                           pure $ Just (task, TandemLeading nest fAntIx walk')
+                         else pure $ Just (startAssessing nest, Recruiting nest (Walk 0 0))
+                     | otherwise -> do
+                       goOutside ant nest'
+                       pure $ Just (task, TandemLeading nest fAntIx walk)
+            else pure Nothing
+      pure $ fromMaybe (TandemLeading nest fAntIx walk) mNewTask
+    TandemFollowing lAnt -> do
+      _ <-
+        withAnt lAnt $ do
+          currentLocation <- readIORef (antLocation ant)
+          destination <- readIORef (antLocation lAnt)
+          unless (destination `elem` cellNeighbors currentLocation) $
+            case destinationToWalk currentLocation destination of
+              Nothing -> pure ()
+              Just destinationWalk -> void $ moveInDirection ant (walkDirection destinationWalk)
+      pure $ TandemFollowing lAnt
     task -> pure task
       -- decideByTask (wTask -> Passive) =
       --   randomWalkInsideNest conf rGen track ant $

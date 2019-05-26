@@ -1,5 +1,6 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module RockAnts.Run where
 
@@ -27,16 +28,26 @@ newEnv Config {..} envLogFunc = do
 
 testGridSpec :: GridSpec
 testGridSpec =
-  GridSpec (Sz2 200 300) GridScale3x4 $
-  A.singleton
-    Nest
-      { nestIx = 0
-      , nestScore = 0
-      , nestNorthWest = 2 :. 2
-      , nestSize = 10
-      , nestEntranceStart = 4 :. 12
-      , nestEntranceEnd = 6 :. 12
-      }
+  GridSpec
+    (Sz2 200 300)
+    GridScale3x4
+    [ Nest
+        { nestIx = 0
+        , nestQuality = 0
+        , nestNorthWest = 50 :. 20
+        , nestSize = Sz (100 :. 70)
+        , nestEntranceStart = 94 :. 90
+        , nestEntranceEnd = 97 :. 90
+        }
+    , Nest
+        { nestIx = 1
+        , nestQuality = 0.9
+        , nestNorthWest = 50 :. 210
+        , nestSize = Sz (100 :. 70)
+        , nestEntranceStart = 94 :. 210
+        , nestEntranceEnd = 97 :. 210
+        }
+    ]
 
 testConfig :: Config
 testConfig =
@@ -54,19 +65,19 @@ testConfig =
           , constMav = pi / 12
           , constAts = 30
           , constPap = 0
-          , constMaxSteps = 20
+          , constMaxSteps = 100
           }
-    , configMaxSteps = 1500
+    , configMaxSteps = 10000
     }
 
 runTest :: IO ()
 runTest = do
   logOpts <- logOptionsHandle stdout True
-  withLogFunc logOpts $ \logFunc -> do
+  withLogFunc (setLogMinLevel LevelInfo logOpts) $ \logFunc -> do
     env <- newEnv config logFunc
     runRIO env $ do
       A.forM_ (colonyWorkers (envColony env)) $ \worker ->
-        withAntTask_ worker (\_ -> pure $ Searching 10 Nothing (Walk 0 0))
+        withAntTask_ worker (\_ -> pure $ HangingAtHome 0 (Walk 0 0))
       void $ tryIO $ removeDirectoryRecursive "output"
       createDirectoryIfMissing True "output"
       runModel 0

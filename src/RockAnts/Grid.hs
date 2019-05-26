@@ -173,6 +173,24 @@ cellInDirection ix@(i :. j) phi'
       | phi < 11 * pi / 6 = i + 1 :. j
       | otherwise = cellInDirection ix $ to2piRange phi'
 
+cellNeighbors :: Ix2 -> [Ix2]
+cellNeighbors (i :. j) =
+  [i - 1 :. j, i + 1 :. j, i :. j - 1, i :. j + 1] ++
+  if odd i
+    then [i - 1 :. j + 1, i + 1 :. j + 1]
+    else [i - 1 :. j - 1, i + 1 :. j - 1]
+
+-- forNeighbors :: Ix2 -> (Ant -> m (Maybe a)) -> RIO Env (Maybe a)
+-- forNeighbors (i :. j) f =
+--   gridMap
+--   e0 <- arr !? (i - 1 :. j)
+--   f e0
+-- , i :. 1, -1 :. j, 1 :. j] ++
+--   if odd i
+--     then [i - 1 :. j + 1, i + 1 :. j + 1]
+--     else [i - 1 :. j - 1, i + 1 :. j - 1]
+
+
 makeGridMap :: GridSpec -> Array DL Ix2 Cell
 makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
   makeLoadArrayS gridSpecSize emptyCell $ \writeCell -> do
@@ -274,15 +292,15 @@ getAntColor Ant {antType, antState} = do
       Brood -> PixelRGB 100 100 100 -- Gray
       Worker ->
         case stateTask state of
-          Passive               -> PixelRGB 000 000 255 -- Blue
-          Searching _ Nothing _ -> PixelRGB 153 000 000 -- Dark Red
-          Searching _ Just {} _ -> PixelRGB 000 153 000 -- Green
-          Assessing _ _         -> PixelRGB 102 102 000 -- Dark Yellow
-          Recruiting _          -> PixelRGB 000 153 153 -- Dark Cyan
-          TandemLeading _       -> PixelRGB 153 000 153 -- Dark Purple
-          TandemFollowing _     -> PixelRGB 255 051 255 -- Light Purple
-          Transporting _        -> PixelRGB 255 128 000 -- Orange
-          Transported _         -> PixelRGB 000 102 000 -- Dark Green
+          Passive            -> PixelRGB 000 000 255 -- Blue
+          Searching {}       -> PixelRGB 153 000 000 -- Dark Red
+          HangingAtHome {}   -> PixelRGB 000 153 000 -- Green
+          Assessing {}       -> PixelRGB 102 102 000 -- Dark Yellow
+          Recruiting {}      -> PixelRGB 000 153 153 -- Dark Cyan
+          TandemLeading {}   -> PixelRGB 153 000 153 -- Dark Purple
+          TandemFollowing {} -> PixelRGB 255 051 255 -- Light Purple
+          Transporting {}    -> PixelRGB 255 128 000 -- Orange
+          Transported {}     -> PixelRGB 000 102 000 -- Dark Green
 
 
 makeColonyImage :: RIO Env (Image S RGB Word8)

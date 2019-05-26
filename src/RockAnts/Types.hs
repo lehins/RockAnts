@@ -48,7 +48,7 @@ instance Show Cell where
 
 data Nest = Nest
   { nestIx            :: !Ix1
-  , nestScore         :: !Float
+  , nestQuality       :: !Float
   , nestSize          :: !Sz2
     -- ^ Overall size of the nest
   , nestNorthWest     :: !Ix2
@@ -70,27 +70,28 @@ data Walk = Walk
   , walkStepsLeft :: !Int
   }
 
+data AssessSteps
+  = AssessStepsLeft !Int
+  | ConsiderStepsLeft !Int
+
 data Task
   = -- | Timesteps before going to OldHome and outside of it.
-  Searching !Int !(Maybe Int) !Walk
+  Searching !Int !Walk
+    -- | Once every so often scouts go home for a while
+  | HangingAtHome !Int !Walk
     -- | Number of steps left to evaluate a nest
-  | Assessing !NestIx !Int
+  | Assessing !Nest !AssessSteps !Walk
     -- | After Assessing takes some time to consider new nest
-  | Recruiting !Bool
+  | Recruiting !Nest !Walk
     -- | Ant index Ix1 is leading
-  | TandemLeading !Int
+  | TandemLeading !Nest !Ix1 !Walk
     -- | Ant index she is following
-  | TandemFollowing !Ix1
+  | TandemFollowing !Ant
     -- | Ant index she is transporting
   | Transporting !Int
     -- | Transported worker needs to remember what she was doing
   | Transported !Task
   | Passive
-
-getWalk :: Task -> Maybe Walk
-getWalk = \case
-  Searching _ _ walk -> Just walk
-  _                  -> Nothing
 
 stateTask :: State -> Task
 stateTask (Idle task) = task
@@ -112,7 +113,7 @@ data Ant = Ant
   , antLocation    :: !(IORef Ix2)
   , antState       :: !(IORef State)
   , antType        :: !AntType
-  , antDiscovered  :: !(Set NestIx)
+  , antDiscovered  :: !(IORef (Set NestIx))
   }
 
 data Colony = Colony
@@ -152,9 +153,12 @@ instance HasGen Env where
 instance HasLogFunc Env where
   logFuncL = lens envLogFunc (\ e f -> e { envLogFunc = f })
 
-homeNest :: Grid -> Nest
-homeNest Grid {gridNests} =
+getHomeNest :: Grid -> Nest
+getHomeNest Grid {gridNests} =
   fromMaybe (error "Home nest has not been initialized") (gridNests !? 0)
+
+askHomeNest :: RIO Env Nest
+askHomeNest = getHomeNest . envGrid <$> ask
 
 data PlaceResult
   = HasPlaced
@@ -223,7 +227,8 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
       , A.replicate Seq broodCount Brood
       , A.replicate Seq queenCount Queen :: Array D Ix1 AntType
       ]
-  let homeIndices = getNestIndices (homeNest grid)
+  antDiscovered <- newIORef (Set.singleton 0)
+  let homeIndices = getNestIndices (getHomeNest grid)
       -- if home is smaller than number of ants, this will loop forever
       getAvailableSpotFor antIx = do
         i <- uniformR (0, unSz (A.size homeIndices) - 1) colonyGen
@@ -231,7 +236,6 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
         placeAntInCell colonyGrid ix antIx >>= \case
           HasPlaced -> pure ix
           _ -> getAvailableSpotFor antIx
-      antDiscovered = Set.singleton 0
       initAnt antIx antType = do
         antDestination <- newIORef Nothing
         locIx <- getAvailableSpotFor antIx
