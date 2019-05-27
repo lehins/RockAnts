@@ -175,9 +175,12 @@ placeAntInCell grid cellIx antIx =
                 | Cell prevIx == wallCell -> pure HitWall
                 | otherwise -> pure $ HasOccupant prevIx
 
-getNestIndices :: Nest -> Array U Ix1 Ix2
-getNestIndices nest =
+getNestIndices' :: Nest -> Array U Ix1 Ix2
+getNestIndices' nest =
   computeAs U $ flatten (nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1)
+
+getNestIndices :: Nest -> Array D Ix2 Ix2
+getNestIndices nest = nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1
 
 
 data GridScale
@@ -229,16 +232,22 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
       ]
   antDiscovered <- newIORef (Set.singleton 0)
   let homeIndices = getNestIndices (getHomeNest grid)
+      homeIndicesCorner =
+        extract' 0 (Sz (liftIndex (`div` 3) (unSz (A.size homeIndices)))) homeIndices
       -- if home is smaller than number of ants, this will loop forever
-      getAvailableSpotFor antIx = do
-        i <- uniformR (0, unSz (A.size homeIndices) - 1) colonyGen
-        ix <- indexM homeIndices i
+      getAvailableSpotFor antIx region = do
+        mix <- runRIO colonyGen $ randomElement region
+        ix <- maybe (error "Region is empty") pure mix
         placeAntInCell colonyGrid ix antIx >>= \case
           HasPlaced -> pure ix
-          _ -> getAvailableSpotFor antIx
+          _ -> getAvailableSpotFor antIx region
       initAnt antIx antType = do
+        let region =
+              if antType == Worker
+                then homeIndices
+                else homeIndicesCorner
         antDestination <- newIORef Nothing
-        locIx <- getAvailableSpotFor antIx
+        locIx <- getAvailableSpotFor antIx region
         antLocation <- newIORef locIx
         antState <- newIORef $ Idle Passive
         pure Ant {..}

@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 module RockAnts.Random where
 
@@ -6,14 +7,19 @@ import RIO
 import System.Random.MWC
 
 class HasGen env where
-  genG :: SimpleGetter env (Gen (PrimState (RIO env)))
+  genG :: SimpleGetter env (Gen RealWorld)
 
-randomElement :: (HasGen env, Source r Ix1 e) => Array r Ix1 e -> RIO env (Maybe e)
+instance HasGen (Gen RealWorld) where
+  genG = id
+
+randomElement ::
+     (HasGen env, Resize r ix, Source r Ix1 e, Load r ix e) => Array r ix e -> RIO env (Maybe e)
 randomElement arr
   | A.isEmpty arr = pure Nothing
   | otherwise = do
-      ix <- uniformRange (0, unSz (size arr) - 1)
-      pure $ evaluateM arr ix
+      let arr' = flatten arr
+      ix <- uniformRange (0, unSz (size arr') - 1)
+      pure $ evaluateM arr' ix
 
 -- | Generates an angle inradians in range @[0, 2*pi)@ as `Double`
 randomDirection :: HasGen env => RIO env Double

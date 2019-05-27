@@ -126,8 +126,6 @@ to2piRange !phi
   | phi >= 2 * pi = to2piRange (phi - 2 * pi)
   | otherwise = phi
 
-sqrt3 :: Double
-sqrt3 = sqrt 3
 
 destinationToWalk :: Ix2 -> Ix2 -> Maybe Walk
 destinationToWalk ix0@(i0 :. j0) ix1@(i1 :. j1)
@@ -135,7 +133,7 @@ destinationToWalk ix0@(i0 :. j0) ix1@(i1 :. j1)
   | otherwise =
     Just
       Walk
-        { walkStepsLeft = abs (i1 - i0) + abs (j1 - j0)
+        { walkStepsLeft = 1 + ((abs (i1 - i0) + abs (j1 - j0)) `div` 2)
         , walkDirection = to2piRange $ adjust + atan ratio
         }
   where
@@ -146,9 +144,9 @@ destinationToWalk ix0@(i0 :. j0) ix1@(i1 :. j1)
         then pi / 2
         else -pi / 2
     !ratio
-      | even i0 && odd i1 = (j' * sqrt3 + sqrt3 / 2) / (i' * 3 / 2)
-      | odd i0 && even i1 = (j' * sqrt3 - sqrt3 / 2) / (i' * 3 / 2)
-      | otherwise = j' * sqrt3 / (i' * (3 / 2))
+      | even i0 && odd i1 = (j' * sqrt 3 + sqrt 3 / 2) / (i' * 3 / 2)
+      | odd i0 && even i1 = (j' * sqrt 3 - sqrt 3 / 2) / (i' * 3 / 2)
+      | otherwise = j' * sqrt 3 / (i' * (3 / 2))
 
 cellInDirection :: Ix2 -> Double -> Ix2
 cellInDirection ix@(i :. j) phi'
@@ -179,16 +177,6 @@ cellNeighbors (i :. j) =
   if odd i
     then [i - 1 :. j + 1, i + 1 :. j + 1]
     else [i - 1 :. j - 1, i + 1 :. j - 1]
-
--- forNeighbors :: Ix2 -> (Ant -> m (Maybe a)) -> RIO Env (Maybe a)
--- forNeighbors (i :. j) f =
---   gridMap
---   e0 <- arr !? (i - 1 :. j)
---   f e0
--- , i :. 1, -1 :. j, 1 :. j] ++
---   if odd i
---     then [i - 1 :. j + 1, i + 1 :. j + 1]
---     else [i - 1 :. j - 1, i + 1 :. j - 1]
 
 
 makeGridMap :: GridSpec -> Array DL Ix2 Cell
@@ -265,7 +253,23 @@ getCellDrawer gridScale =
     GridScale3x4 -> CellScaler (Sz2 3 4) (1 :. 2) drawCell4x4
     GridScale5x6 -> CellScaler (Sz2 5 6) (2 :. 3) drawCell7x6
 
+emptyGridSpec :: GridSpec
+emptyGridSpec = GridSpec (Sz2 200 300) GridScale3x4 A.empty
 
+emptyGrid :: Grid
+emptyGrid = makeGrid emptyGridSpec
+
+-- | Direction gradient, as a sanity check.
+gradient :: IO (Image S RGB Word8)
+gradient =
+  withMArray (gridImage emptyGrid) $ \_ _ image ->
+    A.forM_ (1 ..: unSz (size (gridMap emptyGrid)) - 1) $ \ix ->
+      let color =
+            case destinationToWalk (100 :. 150) ix of
+              Nothing -> PixelRGB 255 0 0
+              Just Walk {..} ->
+                PixelRGB 0 (round (walkDirection * 255 / (2 * pi))) (fromIntegral walkStepsLeft)
+       in drawCell (gridCellDrawer emptyGrid) (\i -> write' image i color) ix
 
 displayGridImage :: Grid -> IO ()
 displayGridImage = displayImage . zoomWithGridD 128 6 . gridImage
