@@ -20,7 +20,7 @@ import Graphics.ColorSpace
 import RIO
 import RIO.Set as Set
 import RockAnts.Random
-import System.Random.MWC
+import System.Random.SplitMix
 
 -- | -2: wall, -1: empty, n: Nest index
 newtype Cell =
@@ -143,7 +143,7 @@ data Env = Env
   -- ^ The immutable part of the environment. A grid with a map of non-moving elements
   -- such as walls of nests, as well as a way to draw on it.
   , envLogFunc   :: !LogFunc
-  , envGen       :: !(Gen (PrimState IO))
+  , envGen       :: !(IORef SMGen)
   , envConstants :: !Constants
   }
 
@@ -196,7 +196,7 @@ data GridSpec = GridSpec
   } deriving Show
 
 data Config = Config
-  { configSeed      :: !Seed
+  { configSeed      :: !(Word64, Word64)
   , configGridSpec  :: !GridSpec
   , configWorkers   :: !Sz1
   , configBrood     :: !Sz1
@@ -220,8 +220,8 @@ data Constants = Constants
   }
 
 
-newColony :: Gen (PrimState IO) -> Grid -> Sz1 -> Sz1 -> IO Colony
-newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
+newColony :: IORef SMGen -> Grid -> Sz1 -> Sz1 -> IO Colony
+newColony genRef grid@Grid {gridMap} workerCount broodCount = do
   colonyGrid <- loadArrayS $ A.map clearNestsIndices gridMap
   antTypes <-
     concatM
@@ -236,7 +236,7 @@ newColony colonyGen grid@Grid {gridMap} workerCount broodCount = do
         extract' 0 (Sz (liftIndex (`div` 3) (unSz (A.size homeIndices)))) homeIndices
       -- if home is smaller than number of ants, this will loop forever
       getAvailableSpotFor antIx region = do
-        mix <- runRIO colonyGen $ randomElement region
+        mix <- runRIO genRef $ randomElement region
         ix <- maybe (error "Region is empty") pure mix
         placeAntInCell colonyGrid ix antIx >>= \case
           HasPlaced -> pure ix

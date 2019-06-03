@@ -68,7 +68,7 @@ changeWalkDirection :: Walk -> RIO Env Walk
 changeWalkDirection Walk {..} = do
   newDirection <- randomDirection -- [0, 2*pi)
   Env {envConstants} <- ask
-  numSteps <- uniformRange (1, constMaxSteps envConstants) -- [1, maxSteps]
+  numSteps <- randomIntRange (1, constMaxSteps envConstants) -- [1, maxSteps]
   pure Walk {walkDirection = newDirection, walkStepsLeft = numSteps}
 
 
@@ -102,12 +102,12 @@ moveInDirection ant@Ant {..} direction = do
 
 addDirectionDelta :: Double -> RIO Env Double
 addDirectionDelta direction = do
-  delta <- uniformExclusive (-pi/12, pi/12)
+  delta <- randomDoubleRangeInclusive (-pi/12, pi/12)
   pure (direction + delta)
 
 randomTurn :: Double -> RIO Env Double
 randomTurn direction = do
-  turnLeft <- uniformRandom
+  turnLeft <- randomBool
   pure $
     if turnLeft
       then direction + (pi / 3 + pi / 216) -- Rock ants are slightly left biased
@@ -182,7 +182,7 @@ tryToSwapWith ant currentLocation otherAnt targetLocation =
     swapAnts = do
       otherAntLocation <- readIORef $ antLocation otherAnt
       -- try swapping only 50% of the time
-      shouldSwap <- uniformRandom
+      shouldSwap <- randomBool
       -- make sure it is still the same "other" ant that we expect
       if otherAntLocation == targetLocation && shouldSwap
         then do
@@ -247,7 +247,7 @@ performTask ant =
           | n > 0 -> Searching (n - 1) <$> walkOutside ant walk
         Nothing -> do
           let hangAtHomeMaxSteps = 200
-          k <- uniformRange (10, hangAtHomeMaxSteps)
+          k <- randomIntRange (10, hangAtHomeMaxSteps)
           homeNest <- askHomeNest
           HangingAtHome k <$> walkInside ant homeNest (Walk 0 0)
         Just nest -> do
@@ -262,7 +262,7 @@ performTask ant =
           | k > 0 -> HangingAtHome k <$> walkInside ant homeNest walk
         Nothing -> do
           let searchMaxSteps = 1000
-          n <- uniformRange (500, searchMaxSteps)
+          n <- randomIntRange (500, searchMaxSteps)
           Searching n <$> walkOutside ant (Walk 0 0)
         Just nest
           | nestIx nest == nestIx homeNest ->
