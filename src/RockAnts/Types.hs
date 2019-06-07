@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -55,7 +56,10 @@ data Nest = Nest
     -- ^ An index for the top left corner of the nest
   , nestEntranceStart :: !Ix2
   , nestEntranceEnd   :: !Ix2
-  } deriving (Eq, Show)
+  } deriving Show
+
+instance Eq Nest where
+  n1 == n2 = nestIx n1 == nestIx n2
 
 nestEntranceRange :: Nest -> Array D Ix1 Ix2
 nestEntranceRange Nest {nestEntranceStart, nestEntranceEnd} =
@@ -70,6 +74,9 @@ data Walk = Walk
   , walkStepsLeft :: !Int
   }
 
+instance Display Walk where
+  display Walk {..} = "Walk <dir=" <> display walkDirection <> ",m=" <> display walkStepsLeft <> ">"
+
 data AssessSteps
   = AssessStepsLeft !Int
   | ConsiderStepsLeft !Int
@@ -81,21 +88,42 @@ data Task
   | HangingAtHome !Int !Walk
     -- | Number of steps left to evaluate a nest
   | Assessing !Nest !AssessSteps !Walk
-    -- | After Assessing takes some time to consider new nest
-  | Recruiting !Nest !Walk
-    -- | Ant index Ix1 is leading
-  | TandemLeading !Nest !Ix1 !Walk
-    -- | Ant index she is following
-  | TandemFollowing !Ant
+    -- | After Assessing an ant will start recruiting. Once quorum is reached,
+    -- transportation recruitement starts.
+  | Recruiting !Bool !Nest !Walk
+    -- | Contains an Ant that she is leading, nest where to adn number of steps since
+    -- last move, in case follower is lost
+  | TandemLeading !Nest !Ant !Int !Walk
+    -- | Contains an Ant she is following and a previous task, in case she gets lost
+  | TandemFollowing !Task !Ant
     -- | Ant index she is transporting
-  | Transporting !Int
+  | Transporting !Nest !Ant !Walk
     -- | Transported worker needs to remember what she was doing
   | Transported !Task
-  | Passive
+  | Passive !Nest !Int !Walk
 
 stateTask :: State -> Task
 stateTask (Idle task) = task
 stateTask (Busy task) = task
+
+instance Display State where
+  display (Idle t) = "Idle(" <> display t <> ")"
+  display (Busy t) = "Busy(" <> display t <> ")"
+
+instance Display Task where
+  display =
+    \case
+      Searching s _w -> "Searching s:" <> display s
+      HangingAtHome s _w -> "HangingAtHome s:" <> display s
+      Assessing n _s _w -> "Assessing nest:" <> display (nestIx n)
+      Recruiting b n _w -> "Recruiting " <> bool "f" "t" b <> " nest:" <> display (nestIx n)
+      TandemLeading n a _ _w ->
+        "TandemLeading nest:" <> display (nestIx n) <> " ant:" <> display (antIx a)
+      TandemFollowing _ a -> "TandemFollowing ant:" <> display (antIx a)
+      Transporting n a _w ->
+        "Transporting nest:" <> display (nestIx n) <> " ant:" <> display (antIx a)
+      Transported t -> "Transported task: <" <> display t <> ">"
+      Passive n _s _w -> "Passive nest:" <> display (nestIx n)
 
 data State =
     Idle !Task
@@ -109,12 +137,15 @@ data AntType
 
 data Ant = Ant
   { antIx          :: !Ix1
-  , antDestination :: !(IORef (Maybe Ix2))
   , antLocation    :: !(IORef Ix2)
   , antState       :: !(IORef State)
   , antType        :: !AntType
   , antDiscovered  :: !(IORef (Set NestIx))
   }
+
+-- | Ant index is her identifier.
+instance Eq Ant where
+  a1 == a2 = antIx a1 == antIx a2
 
 data Colony = Colony
   { colonyGrid    :: !(MArray (PrimState IO) P Ix2 Ix1)
@@ -164,16 +195,33 @@ data PlaceResult
   = HasPlaced
   | HitWall
   | HasOccupant Ix1
+  deriving Show
 
 placeAntInCell ::
      (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m PlaceResult
 placeAntInCell grid cellIx antIx =
   casIntArray grid cellIx (coerce emptyCell) antIx >>= \case
-    Nothing -> throwString $
-               "Should not attempt to write into out of bounds cell: " <> show cellIx
-    Just prevIx | Cell prevIx == emptyCell -> pure HasPlaced
-                | Cell prevIx == wallCell -> pure HitWall
-                | otherwise -> pure $ HasOccupant prevIx
+    Nothing ->
+      throwString $ "Should not attempt to write into out of bounds cell: " <> show cellIx
+    Just prevIx
+      | Cell prevIx == emptyCell -> pure HasPlaced
+      | Cell prevIx == wallCell -> pure HitWall
+      | otherwise -> pure $ HasOccupant prevIx
+
+-- | Assumption is the is that the ant is at the specified location otherwise error.
+removeAntFromCell ::
+     (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m ()
+removeAntFromCell grid cellIx antIx =
+  casIntArray grid cellIx antIx (coerce emptyCell) >>= \case
+    Nothing ->
+      throwString $ "Should not attempt to write into out of bounds cell: " <> show cellIx
+    Just prevIx
+      | prevIx == antIx -> pure ()
+      | otherwise ->
+        throwString $
+        "There was no ant at specified location: " <> show cellIx <> " discovered: " <>
+        show prevIx <>
+        " instead"
 
 getNestIndices' :: Nest -> Array U Ix1 Ix2
 getNestIndices' nest =
@@ -246,13 +294,13 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
               if antType == Worker
                 then homeIndices
                 else homeIndicesCorner
-        antDestination <- newIORef Nothing
         locIx <- getAvailableSpotFor antIx region
         antLocation <- newIORef locIx
-        antState <- newIORef $ Idle Passive
+        antState <- newIORef $ Idle (Passive (getHomeNest grid) 0 (Walk 0 0))
         pure Ant {..}
   colonyAnts <- itraversePrim initAnt $ computeAs B antTypes
-  colonyWorkers <- extractM 0 workerCount colonyAnts
+  colonyWorkers <-
+    extractM 0 workerCount $ setComp (ParN (fromIntegral (unSz workerCount))) colonyAnts
   pure Colony {..}
   where
     queenCount = 1

@@ -22,7 +22,8 @@ randomElement arr
       let sz = size arr
           k = totalElem sz
       i <- randomIntRange (0, k - 1)
-      pure $ evaluateM arr (fromLinearIndex sz i)
+      e <- evaluateM arr (fromLinearIndex sz i)
+      pure $ Just e
 
 
 
@@ -53,7 +54,7 @@ randomDoubleRangeInclusive :: HasGen env => (Double, Double) -> RIO env Double
 randomDoubleRangeInclusive (x, y) = randomDoubleRange (x, y + 2 ** (-53))
 
 
--- | Generates an angle inradians in range @[0, 2*pi)@ as `Double`
+-- | Generates an angle in radians in range @[0, 2*pi)@ as `Double`
 randomDirection :: HasGen env => RIO env Double
 randomDirection = (2*pi*) <$> randomDouble
 

@@ -48,11 +48,81 @@ testGridSpec =
         }
     ]
 
+testGridSpec2 :: GridSpec
+testGridSpec2 =
+  GridSpec
+    (Sz2 300 300)
+    GridScale3x4
+    [ Nest
+        { nestIx = 0
+        , nestQuality = 0
+        , nestNorthWest = 50 :. 20
+        , nestSize = Sz (100 :. 70)
+        , nestEntranceStart = 94 :. 90
+        , nestEntranceEnd = 97 :. 90
+        }
+    , Nest
+        { nestIx = 1
+        , nestQuality = 0.7
+        , nestNorthWest = 50 :. 210
+        , nestSize = Sz (60 :. 70)
+        , nestEntranceStart = 74 :. 210
+        , nestEntranceEnd = 77 :. 210
+        }
+    , Nest
+        { nestIx = 2
+        , nestQuality = 0.9
+        , nestNorthWest = 170 :. 210
+        , nestSize = Sz (100 :. 70)
+        , nestEntranceStart = 224 :. 210
+        , nestEntranceEnd = 227 :. 210
+        }
+    ]
+
+testGridSpec3 :: GridSpec
+testGridSpec3 =
+  GridSpec
+    (Sz2 300 400)
+    GridScale3x4
+    [ Nest
+        { nestIx = 0
+        , nestQuality = 0
+        , nestNorthWest = 50 :. 20
+        , nestSize = Sz (100 :. 70)
+        , nestEntranceStart = 94 :. 90
+        , nestEntranceEnd = 97 :. 90
+        }
+    , Nest
+        { nestIx = 1
+        , nestQuality = 0.6
+        , nestNorthWest = 20 :. 300
+        , nestSize = Sz (60 :. 70)
+        , nestEntranceStart = 44 :. 300
+        , nestEntranceEnd = 47 :. 300
+        }
+    , Nest
+        { nestIx = 1
+        , nestQuality = 0.7
+        , nestNorthWest = 100 :. 300
+        , nestSize = Sz (70 :. 70)
+        , nestEntranceStart = 124 :. 300
+        , nestEntranceEnd = 127 :. 300
+        }
+    , Nest
+        { nestIx = 2
+        , nestQuality = 0.8
+        , nestNorthWest = 200 :. 300
+        , nestSize = Sz (80 :. 70)
+        , nestEntranceStart = 244 :. 300
+        , nestEntranceEnd = 247 :. 300
+        }
+    ]
+
 testConfig :: Config
 testConfig =
   Config
     { configSeed = (7189523021148931526, 5721129601325187147)
-    , configGridSpec = testGridSpec
+    , configGridSpec = testGridSpec3
     , configWorkers = 150
     , configBrood = 20
     , configSteps = Just 3
@@ -66,7 +136,7 @@ testConfig =
           , constPap = 0
           , constMaxSteps = 100
           }
-    , configMaxSteps = 10000
+    , configMaxSteps = 30000
     }
 
 runTest :: IO ()

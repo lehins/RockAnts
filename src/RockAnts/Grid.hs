@@ -296,7 +296,7 @@ getAntColor Ant {antType, antState} = do
       Brood -> PixelRGB 100 100 100 -- Gray
       Worker ->
         case stateTask state of
-          Passive            -> PixelRGB 000 000 255 -- Blue
+          Passive {}         -> PixelRGB 000 000 255 -- Blue
           Searching {}       -> PixelRGB 153 000 000 -- Dark Red
           HangingAtHome {}   -> PixelRGB 000 153 000 -- Green
           Assessing {}       -> PixelRGB 102 102 000 -- Dark Yellow
