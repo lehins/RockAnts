@@ -80,3 +80,22 @@ nextIntRange (x1, x2) g
          else go gen'
 
 
+
+
+-- | T. albipennis scouts show behavioural lateralization when exploring unknown
+-- nest sites, showing a population-level bias to prefer left turns. One
+-- possible reason for this is that its environment is partly maze-like and
+-- consistently turning in one direction is a good way to search and exit mazes
+-- without getting lost.
+addDirectionDelta :: HasGen env => Double -> RIO env Double
+addDirectionDelta direction = do
+  delta <- randomDoubleRangeInclusive (-pi / 12, pi / 12 + pi / 216)
+  pure (direction + delta)
+
+randomTurn :: HasGen env => Double -> RIO env Double
+randomTurn direction = do
+  turnLeft <- randomBool
+  pure $
+    if turnLeft
+      then direction + (pi / 3 + pi / 216) -- Rock ants are slightly left biased
+      else direction - pi / 3

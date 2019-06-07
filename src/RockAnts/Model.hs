@@ -101,18 +101,6 @@ moveInDirection ant@Ant {..} direction = do
         then addDirectionDelta direction
         else randomTurn direction >>= moveInDirection ant
 
-addDirectionDelta :: Double -> RIO Env Double
-addDirectionDelta direction = do
-  delta <- randomDoubleRangeInclusive (-pi/12, pi/12)
-  pure (direction + delta)
-
-randomTurn :: Double -> RIO Env Double
-randomTurn direction = do
-  turnLeft <- randomBool
-  pure $
-    if turnLeft
-      then direction + (pi / 3 + pi / 216) -- Rock ants are slightly left biased
-      else direction - pi / 3
 
 -- | Atomically modify an Ant. Returns `Nothing` if the Ant was busy and couldn't be
 -- updated.
@@ -162,16 +150,12 @@ withAntAt ix f = do
             else pure (task, Nothing)
       pure $ join mRes
 
-forNeighbors :: Ant -> (Ant -> Task -> RIO Env (Maybe (Task, a))) -> RIO Env (Maybe a)
-forNeighbors Ant{antLocation} f = do
-  ix <- readIORef antLocation
-  foldM action Nothing $ cellNeighbors ix
-  where
-    action mAnt@Just {} _ = pure mAnt
-    action Nothing cellIx = withAntAt cellIx f
-
 replaceAntInCell ::
-     (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> Ix1 -> m Bool
+     (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1
+     -> Ix2 -- ^ Location where we want to place the ant
+     -> Ix1 -- ^ Index of an ant that is expected to be in the cell
+     -> Ix1 -- ^ Index of the ant that should be placed in that cell
+     -> m Bool
 replaceAntInCell grid cellIx otherAntIx antIx =
   casIntArray grid cellIx otherAntIx antIx >>= \case
     Just prevIx -> pure (prevIx == otherAntIx)
@@ -189,26 +173,35 @@ tryToSwapWith ant currentLocation otherAnt targetLocation = do
   where
     swapAnts = do
       otherAntLocation <- readIORef $ antLocation otherAnt
-          -- make sure it is still the same "other" ant that we expect
+      -- make sure it is still the same "other" ant that we expect
       if otherAntLocation == targetLocation
         then do
           logDebug $ "swapping ants: " <> display (antIx otherAnt) <> " and " <> display (antIx ant)
           Colony {colonyGrid} <- envColony <$> ask
+          -- when (colonyGrid ! targetLocation /= antIx otherAnt) $
           unlessM (replaceAntInCell colonyGrid targetLocation (antIx otherAnt) (antIx ant)) $ do
-            aSource <- readIORef (antState ant)
-            aTarget <- readIORef (antState otherAnt)
+            toPlace <- readIORef (antState ant)
+            toRemove <- readIORef (antState otherAnt)
             logError $
-              "Couldn't place an ant into a cell while swapping: " <> display aTarget <> ">>" <>
-              display aSource
+              "Couldn't place an ant: " <> display (antIx ant) <>
+              " into a cell while swapping with: " <>
+              display (antIx otherAnt) <>
+              " - " <>
+              display toPlace <>
+              ">>" <>
+              display toRemove
           writeIORef (antLocation ant) targetLocation
           unlessM (replaceAntInCell colonyGrid currentLocation (antIx ant) (antIx otherAnt)) $ do
-            aSource <- readIORef (antState ant)
-            aTarget <- readIORef (antState otherAnt)
+            toPlace <- readIORef (antState otherAnt)
+            toRemove <- readIORef (antState ant)
             logError $
-              "Couldn't place another ant into the original cell while swapping: " <>
-              display aTarget <>
-              "<<" <>
-              display aSource
+              "Couldn't place another ant: " <> display (antIx otherAnt) <>
+              " into the original cell while swapping with: " <>
+              display (antIx ant) <>
+              " - " <>
+              display toPlace <>
+              ">>" <>
+              display toRemove
           writeIORef (antLocation otherAnt) currentLocation
           pure True
         else pure False
@@ -242,8 +235,16 @@ startRecruiting Ant {antDiscovered} = do
   Grid {gridNests} <- envGrid <$> ask
   discoveredNests <- P.mapM (indexM gridNests) $ F.toList discoveredSet
   let nest = F.maximumBy (\n1 n2 -> compare (nestQuality n1) (nestQuality n2)) discoveredNests
-  pure $ Recruiting False nest (Walk 0 0)
+  pure $ Recruiting nest (Walk 0 0)
 
+
+forNeighbors :: Ant -> (Ant -> Task -> RIO Env (Maybe (Task, a))) -> RIO Env (Maybe a)
+forNeighbors Ant{antLocation} f = do
+  ix <- readIORef antLocation
+  foldM action Nothing $ cellNeighbors ix
+  where
+    action mAnt@Just {} _ = pure mAnt
+    action Nothing cellIx = withAntAt cellIx f
 
 recruitAnt :: Ant -> Ant -> Task -> Maybe (Task, Ant)
 recruitAnt leaderAnt followerAnt targetAntTask =
@@ -266,19 +267,26 @@ pickupAnt destinationNest targetAnt targetAntTask =
    in case targetAntTask of
         Searching {} -> transportedAnt targetAntTask
         HangingAtHome {} -> transportedAnt targetAntTask
-        Recruiting False _ _ -> transportedAnt targetAntTask
-        Passive {} -> transportedAnt (Passive destinationNest 0 (Walk 0 0))
+        Recruiting toNest _
+          | toNest /= destinationNest -> transportedAnt targetAntTask
+        Passive homeNest _ _
+          | homeNest /= destinationNest -> transportedAnt (Passive destinationNest 0 (Walk 0 0))
         _ -> pure Nothing
 
 checkQuorum :: Nest -> RIO Env Bool
-checkQuorum Nest {..} = do
-  Colony {colonyAnts} <- envColony <$> ask
-  ixs <- A.mapMR U (readIORef . antLocation) colonyAnts
-  let withinNestPlus1 acc ix
-        | isSafeIndex nestSize (ix - nestNorthWest) = acc + 1
-        | otherwise = acc
-  -- TODO: make quorum cusomizable
-  pure (foldlS withinNestPlus1 0 ixs >= totalElem (A.size colonyAnts) `div` 10)
+checkQuorum nest = do
+  Colony {colonyWorkers} <- envColony <$> ask
+  let countRecruiters acc Ant {antState} =
+        stateTask <$> readIORef antState >>= \case
+          Recruiting nest' _
+            | nest' == nest -> pure (acc + 1)
+          TandemLeading nest' _ _ _
+            | nest' == nest -> pure (acc + 1)
+          Transporting nest' _ _
+            | nest' == nest -> pure (acc + 1)
+          _ -> pure acc
+  rCount <- A.foldlM countRecruiters 0 colonyWorkers
+  pure (rCount >= totalElem (A.size colonyWorkers) `div` 10)
 
 performTask :: Ant -> Task -> RIO Env Task
 performTask ant =
@@ -303,8 +311,8 @@ performTask ant =
         Nothing
           | k > 0 -> HangingAtHome k <$> walkInside ant homeNest walk
         Nothing -> do
-          let searchMaxSteps = 1000
-          n <- randomIntRange (500, searchMaxSteps)
+          Grid {gridSearchSteps} <- envGrid <$> ask
+          n <- randomIntRange (500, gridSearchSteps)
           Searching n <$> walkOutside ant (Walk 0 0)
         Just (_, nest)
           | nestIx nest == nestIx homeNest ->
@@ -330,24 +338,27 @@ performTask ant =
       if n > 0
         then Assessing nest (ConsiderStepsLeft (n - 1)) <$> walkInside ant nest walk
         else startRecruiting ant
-    Recruiting hasReachedQuorum nest walk ->
+    Recruiting nest walk -> do
+      homeNest <- askHomeNest
       isInsideNest ant >>= \case
         Just (_, curNest)
-          | curNest == nest -> Recruiting hasReachedQuorum nest <$> goOutside ant nest
-        _
-          | hasReachedQuorum ->
-            forNeighbors ant (pickupAnt nest) >>= \case
-              Just transportedAnt -> pure $ Transporting nest transportedAnt (Walk 0 0)
-              Nothing -> do
-                homeNest <- askHomeNest
-                -- TODO: target lost ants
-                Recruiting hasReachedQuorum nest <$> walkInside ant homeNest walk
-          | otherwise ->
-            forNeighbors ant (\nAnt task -> pure (recruitAnt ant nAnt task)) >>= \case
-              Just followerAnt -> pure $ TandemLeading nest followerAnt 0 (Walk 0 0)
-              Nothing -> do
-                homeNest <- askHomeNest
-                Recruiting hasReachedQuorum nest <$> walkInside ant homeNest walk
+          | curNest /= homeNest -> Recruiting nest <$> goOutside ant curNest
+        _ -> do
+          mNewTask <-
+            forNeighbors ant $ \nAnt task -> do
+              hasReachedQuorum <- checkQuorum nest
+              if hasReachedQuorum
+                then pickupAnt nest nAnt task >>= \case
+                       Just (tTask, transportedAnt) ->
+                         pure $ Just (tTask, Transporting nest transportedAnt (Walk 0 0))
+                       Nothing -> pure Nothing
+                else case recruitAnt ant nAnt task of
+                       Just (fTask, followerAnt) ->
+                         pure $ Just (fTask, TandemLeading nest followerAnt 0 (Walk 0 0))
+                       Nothing -> pure Nothing
+          case mNewTask of
+            Just task -> pure task
+            Nothing -> Recruiting nest <$> walkInside ant homeNest walk
     task@(TandemLeading nest fAnt waitingSteps _)
       | waitingSteps > 50 -> do
         isLost <-
@@ -357,7 +368,7 @@ performTask ant =
             fTask ->
               throwString $ "Follower is in an impossible state: " ++ T.unpack (textDisplay fTask)
         if isLost
-          then pure $ Recruiting False nest (Walk 0 0)
+          then pure $ Recruiting nest (Walk 0 0)
           else pure task
     task@(TandemLeading nest fAnt waitingSteps walk) ->
       fmap (fromMaybe task) $
@@ -365,9 +376,8 @@ performTask ant =
         if nAnt == fAnt -- only move when the follower is nearby
           then isInsideNest ant >>= \case
                  Just (curIx, curNest)
-                   | curNest == nest && isCloseToCenter curIx nest -> do
-                     hasReachedQuorum <- checkQuorum nest
-                     pure $ Just (startAssessing nest, Recruiting hasReachedQuorum nest (Walk 0 0))
+                   | curNest == nest && isCloseToCenter curIx nest ->
+                     pure $ Just (startAssessing nest, Recruiting nest (Walk 0 0))
                  Just (_curIx, curNest)
                    | curNest == nest -> do
                      walk' <- walkInside ant nest walk
@@ -405,9 +415,8 @@ performTask ant =
                   Colony {colonyGrid} <- envColony <$> ask
                   placeAntInCell colonyGrid curIx (antIx transportedAnt) >>= \case
                     HasPlaced
-                      | Transported tPrevTask <- tCurTask -> do
-                        hasReachedQuorum <- checkQuorum targetNest
-                        pure (tPrevTask, Recruiting hasReachedQuorum targetNest newWalk)
+                      | Transported tPrevTask <- tCurTask ->
+                        pure (tPrevTask, Recruiting targetNest newWalk)
                     HasOccupant _ -- some other ant took the spot, abort the drop
                      -> updateTransported tCurTask newWalk
                     res ->
@@ -445,7 +454,10 @@ colonyStep = do
           aix <- read' colonyGrid ix
           unless (aix == antIx worker) $
             logError $
-            "Misplaced an ant. Expected ant: " <> display (antIx worker) <>
-            " to be in cell: " <>
-            displayShow ix
+              "Misplaced an ant. Expected ant: " <> display (antIx worker) <>
+              " while switching from: " <> display task <>
+              " to task: " <>
+              display task' <>
+              " to be in cell: " <>
+              displayShow ix
       pure task'

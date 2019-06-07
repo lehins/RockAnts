@@ -1,10 +1,10 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -90,7 +90,7 @@ data Task
   | Assessing !Nest !AssessSteps !Walk
     -- | After Assessing an ant will start recruiting. Once quorum is reached,
     -- transportation recruitement starts.
-  | Recruiting !Bool !Nest !Walk
+  | Recruiting !Nest !Walk
     -- | Contains an Ant that she is leading, nest where to adn number of steps since
     -- last move, in case follower is lost
   | TandemLeading !Nest !Ant !Int !Walk
@@ -116,7 +116,7 @@ instance Display Task where
       Searching s _w -> "Searching s:" <> display s
       HangingAtHome s _w -> "HangingAtHome s:" <> display s
       Assessing n _s _w -> "Assessing nest:" <> display (nestIx n)
-      Recruiting b n _w -> "Recruiting " <> bool "f" "t" b <> " nest:" <> display (nestIx n)
+      Recruiting n _w -> "Recruiting nest:" <> display (nestIx n)
       TandemLeading n a _ _w ->
         "TandemLeading nest:" <> display (nestIx n) <> " ant:" <> display (antIx a)
       TandemFollowing _ a -> "TandemFollowing ant:" <> display (antIx a)
@@ -136,11 +136,11 @@ data AntType
   deriving (Eq, Show)
 
 data Ant = Ant
-  { antIx          :: !Ix1
-  , antLocation    :: !(IORef Ix2)
-  , antState       :: !(IORef State)
-  , antType        :: !AntType
-  , antDiscovered  :: !(IORef (Set NestIx))
+  { antIx         :: !Ix1
+  , antLocation   :: !(IORef Ix2)
+  , antState      :: !(IORef State)
+  , antType       :: !AntType
+  , antDiscovered :: !(IORef (Set NestIx))
   }
 
 -- | Ant index is her identifier.
@@ -160,10 +160,13 @@ data CellDrawer = CellScaler
   }
 
 data Grid = Grid
-  { gridNests      :: !(Array B Ix1 Nest)
-  , gridMap        :: !(Array P Ix2 Cell)
-  , gridImage      :: !(Image S RGB Word8)
-  , gridCellDrawer :: !CellDrawer
+  { gridNests       :: !(Array B Ix1 Nest)
+  , gridMap         :: !(Array P Ix2 Cell)
+  , gridImage       :: !(Image S RGB Word8)
+  , gridCellDrawer  :: !CellDrawer
+  , gridSearchSteps :: !Int
+  -- ^ Max number of steps, before a scount should go home. It seems like it should be
+  -- proportional to the size of the environment
   }
 
 
@@ -238,9 +241,10 @@ data GridScale
   deriving (Eq, Show)
 
 data GridSpec = GridSpec
-  { gridSpecSize  :: !Sz2
-  , gridSpecScale :: !GridScale
-  , gridSpecNests :: !(Array B Ix1 Nest)
+  { gridSpecSize     :: !Sz2
+  , gridSpecScale    :: !GridScale
+  , gridSpecNests    :: !(Array B Ix1 Nest)
+  , gridSpecMaxSteps :: !Int
   } deriving Show
 
 data Config = Config
@@ -253,7 +257,7 @@ data Config = Config
   , configVerbose   :: !Bool
   , configConstants :: !Constants
   , configMaxSteps  :: !Int
-  -- ^ What is the maximum number of steps to run the model for until consider run as failed
+  -- ^ What is the maximum number of steps to run the model for
   }
 
 data Constants = Constants
@@ -300,7 +304,10 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
         pure Ant {..}
   colonyAnts <- itraversePrim initAnt $ computeAs B antTypes
   colonyWorkers <-
-    extractM 0 workerCount $ setComp (ParN (fromIntegral (unSz workerCount))) colonyAnts
+    extractM 0 workerCount colonyAnts -- $ setComp (ParN (fromIntegral (unSz workerCount))) colonyAnts
+  -- Initialize 30% of workers to scouts, the rest will passively hang out at a broken home
+  scouts <- extractM 0 (Sz (unSz workerCount `div` 3)) colonyWorkers
+  A.forM_ scouts $ \scout -> writeIORef (antState scout) (Idle (HangingAtHome 0 (Walk 0 0)))
   pure Colony {..}
   where
     queenCount = 1
@@ -310,57 +317,3 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
         else ix
 
 
-
--- Each ant:to:ant interaction should be:
---  * Check for expected state
---  * Try take baton
---  * Check for the same state again
-
--- Ant taking a step:
---  * Two atomic writes
---    0. set ant as moving (try take baton, if failed it is being carried)
---    1. CAS: if destination cell is empty or self, but not a wall or another ant, move that ant there
---    2. upon succeess remove that ant from previous cell with a simple write -1
---    3. update his location in self
---    4. in above situation, an ant will be in two cells. Why is it not a problem:
---       * no ant can go into a cell where another ant is
---       * In order for ant to be picked up, he has to be non-moving
---    5. set ant as non-moving
-
--- Ant picking up another ant
---  * Before can carry self baton needs to be picked up
---  * Whenever ant is looking to carry another and finds one
---    0. try take his moving baton, if not just continue with moving
---    1. pick her up: take her of the grid
---    2. set busy flag (carrying, scouting, tandem leading, being lead)
---    2. keep updating her location as well as self for image rendering
---    3. do not release either of the batons until drop off
---
-
--- Deciding on leading another ant
---  * Before can lead self baton needs to be picked up
---  * Whenever an ant is near by
---    0. try take his baton, if not just continue with recruitement
---    1. update both ants state
---    2. release followers baton (she can't be bothered in a follower state)
---    3. release self baton
-
-
--- Leading
---  0. Take self baton
---  1. take a step
---  2. do not release baton
-
--- Follower
---  0. Take self baton
---  1. Make a step towards the leader
---  2. If leader is in the nearby cell, release her baton
-
-
-
--- Facts:
---
---  * T. albipennis scouts show behavioural lateralization when exploring unknown nest sites,
---  showing a population-level bias to prefer left turns. One possible reason for this is that its
---  environment is partly maze-like and consistently turning in one direction is a good way to
---  search and exit mazes without getting lost.

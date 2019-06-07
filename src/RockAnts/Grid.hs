@@ -224,12 +224,13 @@ makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
 
 
 makeGrid :: GridSpec -> Grid
-makeGrid gridSpec@GridSpec {gridSpecNests, gridSpecScale} =
+makeGrid gridSpec@GridSpec {gridSpecNests, gridSpecScale, gridSpecMaxSteps} =
   Grid
     { gridNests = gridSpecNests
     , gridMap = compute $ makeGridMap gridSpec
     , gridImage = compute $ makeGridImage gridSpec cellDrawer
     , gridCellDrawer = cellDrawer
+    , gridSearchSteps = gridSpecMaxSteps
     }
   where
     cellDrawer = getCellDrawer gridSpecScale
@@ -254,7 +255,7 @@ getCellDrawer gridScale =
     GridScale5x6 -> CellScaler (Sz2 5 6) (2 :. 3) drawCell7x6
 
 emptyGridSpec :: GridSpec
-emptyGridSpec = GridSpec (Sz2 200 300) GridScale3x4 A.empty
+emptyGridSpec = GridSpec (Sz2 200 300) GridScale3x4 A.empty 1000
 
 emptyGrid :: Grid
 emptyGrid = makeGrid emptyGridSpec
@@ -314,7 +315,8 @@ makeColonyImage = do
       Colony {colonyAnts} = envColony env
   withMArray gridImage $ \_ _ image ->
     -- parallelizable
-    A.forM_ colonyAnts $ \ant@Ant {antLocation} -> do
+    -- A.forM_ colonyAnts $ \ant@Ant {antLocation} -> do
+    A.forIO_ (setComp Par colonyAnts) $ \ant@Ant {antLocation} -> do
       color <- getAntColor ant
       ix <- readIORef antLocation
       drawCell gridCellDrawer (\i -> write' image i color) ix
