@@ -342,7 +342,11 @@ performTask ant =
       homeNest <- askHomeNest
       isInsideNest ant >>= \case
         Just (_, curNest)
-          | curNest /= homeNest -> Recruiting nest <$> goOutside ant curNest
+          | curNest /= homeNest -> do
+            haveSeen <- hasDiscovered ant curNest
+            if haveSeen
+              then Recruiting nest <$> goOutside ant curNest
+              else pure $ startAssessing nest
         _ -> do
           mNewTask <-
             forNeighbors ant $ \nAnt task -> do

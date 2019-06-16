@@ -186,6 +186,8 @@ runTest = do
       runModel 0
       iGrid <- freeze Seq (colonyGrid (envColony env))
       logDebug $ displayShow iGrid
+      -- TODO: make a video:
+      -- ffmpeg -r 24 -i %*0.png -s hd1080 -vcodec libx264 -pix_fmt yuv420p timelapse-1080p.mp4
   where
     config = testConfig
     maxNumSteps = configMaxSteps config
