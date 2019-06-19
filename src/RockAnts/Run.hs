@@ -4,17 +4,17 @@
 {-# LANGUAGE RecordWildCards #-}
 module RockAnts.Run where
 
-import Control.Scheduler
 import Data.Massiv.Array as A
 import Data.Massiv.Array.IO
 import RIO
 import RIO.Directory
-import Text.Printf
+import RIO.Process
 import System.Random.SplitMix (seedSMGen')
+import Text.Printf
 
 import RockAnts.Grid
-import RockAnts.Types
 import RockAnts.Model
+import RockAnts.Types
 
 newEnv :: Config -> LogFunc -> IO Env
 newEnv Config {..} envLogFunc = do
@@ -22,6 +22,7 @@ newEnv Config {..} envLogFunc = do
       envConstants = configConstants
   envGen <- newIORef (seedSMGen' configSeed)
   envColony <- newColony envGen envGrid configWorkers configBrood
+  envProcessContext <- mkDefaultProcessContext
   pure Env {..}
 
 
@@ -81,78 +82,6 @@ testGridSpecEq =
     ]
     2000
 
-testGridSpec2 :: GridSpec
-testGridSpec2 =
-  GridSpec
-    (Sz2 300 300)
-    GridScale3x4
-    [ Nest
-        { nestIx = 0
-        , nestQuality = 0
-        , nestNorthWest = 50 :. 20
-        , nestSize = Sz (100 :. 70)
-        , nestEntranceStart = 94 :. 90
-        , nestEntranceEnd = 97 :. 90
-        }
-    , Nest
-        { nestIx = 1
-        , nestQuality = 0.7
-        , nestNorthWest = 50 :. 210
-        , nestSize = Sz (60 :. 70)
-        , nestEntranceStart = 74 :. 210
-        , nestEntranceEnd = 77 :. 210
-        }
-    , Nest
-        { nestIx = 2
-        , nestQuality = 0.9
-        , nestNorthWest = 170 :. 210
-        , nestSize = Sz (100 :. 70)
-        , nestEntranceStart = 224 :. 210
-        , nestEntranceEnd = 227 :. 210
-        }
-    ]
-    2000
-
-testGridSpec3 :: GridSpec
-testGridSpec3 =
-  GridSpec
-    (Sz2 300 400)
-    GridScale3x4
-    [ Nest
-        { nestIx = 0
-        , nestQuality = 0
-        , nestNorthWest = 50 :. 20
-        , nestSize = Sz (100 :. 70)
-        , nestEntranceStart = 94 :. 90
-        , nestEntranceEnd = 97 :. 90
-        }
-    , Nest
-        { nestIx = 1
-        , nestQuality = 0.6
-        , nestNorthWest = 20 :. 300
-        , nestSize = Sz (60 :. 70)
-        , nestEntranceStart = 44 :. 300
-        , nestEntranceEnd = 47 :. 300
-        }
-    , Nest
-        { nestIx = 1
-        , nestQuality = 0.7
-        , nestNorthWest = 100 :. 300
-        , nestSize = Sz (70 :. 70)
-        , nestEntranceStart = 124 :. 300
-        , nestEntranceEnd = 127 :. 300
-        }
-    , Nest
-        { nestIx = 2
-        , nestQuality = 0.8
-        , nestNorthWest = 200 :. 300
-        , nestSize = Sz (80 :. 70)
-        , nestEntranceStart = 244 :. 300
-        , nestEntranceEnd = 247 :. 300
-        }
-    ]
-    4000
-
 testConfig :: Config
 testConfig =
   Config
@@ -171,7 +100,7 @@ testConfig =
           , constPap = 0
           , constMaxSteps = 100
           }
-    , configMaxSteps = 20000
+    , configMaxSteps = 2000
     }
 
 runTest :: IO ()
@@ -184,10 +113,8 @@ runTest = do
       createDirectoryIfMissing True "output"
       logInfo "Starting the simulation"
       runModel 0
-      iGrid <- freeze Seq (colonyGrid (envColony env))
-      logDebug $ displayShow iGrid
-      -- TODO: make a video:
-      -- ffmpeg -r 24 -i %*0.png -s hd1080 -vcodec libx264 -pix_fmt yuv420p timelapse-1080p.mp4
+      makeVideo
+      -- ffmpeg -r 24 -i output/%*0.png -s hd1080 -vcodec libx264 -pix_fmt yuv420p simulation.mp4
   where
     config = testConfig
     maxNumSteps = configMaxSteps config
@@ -196,8 +123,26 @@ runTest = do
       | i < maxNumSteps = do
         img <- makeColonyImage
         let path = printf ("output/step_%0" <> show maxNumLen <> "d.png") i
-        liftIO $ writeImage path img -- $ computeAs S $ zoomWithGrid 128 (Stride 12) img
+        liftIO $ writeImage path img
         colonyStep
         logSticky $ "Step: " <> display i <> "/" <> display maxNumSteps
         runModel (i + 1)
       | otherwise = logStickyDone $ "Done: " <> display i <> " steps"
+    makeVideo = do
+      let videoName = "simulation.mp4"
+      whenM (doesFileExist videoName) $ removeFile videoName
+      proc
+        "ffmpeg"
+        [ "-r"
+        , "24"
+        , "-i"
+        , "output/%*0.png"
+        , "-s"
+        , "hd1080"
+        , "-vcodec"
+        , "libx264"
+        , "-pix_fmt"
+        , "yuv420p"
+        , videoName
+        ]
+        runProcess_

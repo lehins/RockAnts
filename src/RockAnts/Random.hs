@@ -22,9 +22,9 @@ randomElement arr
       let sz = size arr
           k = totalElem sz
       i <- randomIntRange (0, k - 1)
+      -- We need to fail loud if index is wrong, since that should never happen
       e <- evaluateM arr (fromLinearIndex sz i)
       pure $ Just e
-
 
 
 randomBool :: HasGen env => RIO env Bool

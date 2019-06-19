@@ -178,7 +178,6 @@ tryToSwapWith ant currentLocation otherAnt targetLocation = do
         then do
           logDebug $ "swapping ants: " <> display (antIx otherAnt) <> " and " <> display (antIx ant)
           Colony {colonyGrid} <- envColony <$> ask
-          -- when (colonyGrid ! targetLocation /= antIx otherAnt) $
           unlessM (replaceAntInCell colonyGrid targetLocation (antIx otherAnt) (antIx ant)) $ do
             toPlace <- readIORef (antState ant)
             toRemove <- readIORef (antState otherAnt)

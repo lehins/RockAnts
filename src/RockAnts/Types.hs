@@ -19,6 +19,7 @@ import Data.Massiv.Array.IO
 import Data.Massiv.Array.Mutable.Atomic
 import Graphics.ColorSpace
 import RIO
+import RIO.Process
 import RIO.Set as Set
 import RockAnts.Random
 import System.Random.SplitMix
@@ -38,7 +39,7 @@ lookupNest :: Array B NestIx Nest -> Cell -> Maybe Nest
 lookupNest arr cell@(Cell ix)
   | cell == emptyCell || cell == wallCell = Nothing
    -- index out of bounds would indicate a bug, be loud about it:
-  | otherwise = Just $ index' arr ix
+  | otherwise = Just $! index' arr ix
 
 
 instance Show Cell where
@@ -50,6 +51,7 @@ instance Show Cell where
 data Nest = Nest
   { nestIx            :: !Ix1
   , nestQuality       :: !Float
+  -- ^ Artificially set quality of a nest
   , nestSize          :: !Sz2
     -- ^ Overall size of the nest
   , nestNorthWest     :: !Ix2
@@ -65,6 +67,8 @@ nestEntranceRange :: Nest -> Array D Ix1 Ix2
 nestEntranceRange Nest {nestEntranceStart, nestEntranceEnd} =
   flatten (nestEntranceStart ... nestEntranceEnd)
 
+getNestIndices :: Nest -> Array D Ix2 Ix2
+getNestIndices nest = nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1
 
 type NestIx = Ix1
 
@@ -102,14 +106,6 @@ data Task
   | Transported !Task
   | Passive !Nest !Int !Walk
 
-stateTask :: State -> Task
-stateTask (Idle task) = task
-stateTask (Busy task) = task
-
-instance Display State where
-  display (Idle t) = "Idle(" <> display t <> ")"
-  display (Busy t) = "Busy(" <> display t <> ")"
-
 instance Display Task where
   display =
     \case
@@ -128,6 +124,15 @@ instance Display Task where
 data State =
     Idle !Task
   | Busy !Task
+
+stateTask :: State -> Task
+stateTask (Idle task) = task
+stateTask (Busy task) = task
+
+instance Display State where
+  display (Idle t) = "Idle(" <> display t <> ")"
+  display (Busy t) = "Busy(" <> display t <> ")"
+
 
 data AntType
   = Worker
@@ -165,20 +170,21 @@ data Grid = Grid
   , gridImage       :: !(Image S RGB Word8)
   , gridCellDrawer  :: !CellDrawer
   , gridSearchSteps :: !Int
-  -- ^ Max number of steps, before a scount should go home. It seems like it should be
+  -- ^ Max number of steps, before a scout should go home. It seems like it should be
   -- proportional to the size of the environment
   }
 
 
 data Env = Env
-  { envColony    :: !Colony
+  { envColony         :: !Colony
   -- ^ Live representatives of a colony. This is the mutable part of the environment
-  , envGrid      :: !Grid
+  , envGrid           :: !Grid
   -- ^ The immutable part of the environment. A grid with a map of non-moving elements
   -- such as walls of nests, as well as a way to draw on it.
-  , envLogFunc   :: !LogFunc
-  , envGen       :: !(IORef SMGen)
-  , envConstants :: !Constants
+  , envLogFunc        :: !LogFunc
+  , envProcessContext :: !ProcessContext
+  , envGen            :: !(IORef SMGen)
+  , envConstants      :: !Constants
   }
 
 instance HasGen Env where
@@ -186,6 +192,9 @@ instance HasGen Env where
 
 instance HasLogFunc Env where
   logFuncL = lens envLogFunc (\ e f -> e { envLogFunc = f })
+
+instance HasProcessContext Env where
+  processContextL = lens envProcessContext (\ e f -> e { envProcessContext = f })
 
 getHomeNest :: Grid -> Nest
 getHomeNest Grid {gridNests} =
@@ -211,7 +220,7 @@ placeAntInCell grid cellIx antIx =
       | Cell prevIx == wallCell -> pure HitWall
       | otherwise -> pure $ HasOccupant prevIx
 
--- | Assumption is the is that the ant is at the specified location otherwise error.
+-- | Assumption is that the ant is at the specified location otherwise error.
 removeAntFromCell ::
      (MonadIO m, PrimMonad m) => MArray (PrimState m) P Ix2 Ix1 -> Ix2 -> Ix1 -> m ()
 removeAntFromCell grid cellIx antIx =
@@ -225,13 +234,6 @@ removeAntFromCell grid cellIx antIx =
         "There was no ant at specified location: " <> show cellIx <> " discovered: " <>
         show prevIx <>
         " instead"
-
-getNestIndices' :: Nest -> Array U Ix1 Ix2
-getNestIndices' nest =
-  computeAs U $ flatten (nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1)
-
-getNestIndices :: Nest -> Array D Ix2 Ix2
-getNestIndices nest = nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1
 
 
 data GridScale
@@ -302,9 +304,9 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
         antLocation <- newIORef locIx
         antState <- newIORef $ Idle (Passive (getHomeNest grid) 0 (Walk 0 0))
         pure Ant {..}
+      antComp = ParN (fromIntegral (unSz workerCount))
   colonyAnts <- itraversePrim initAnt $ computeAs B antTypes
-  colonyWorkers <-
-    extractM 0 workerCount colonyAnts -- $ setComp (ParN (fromIntegral (unSz workerCount))) colonyAnts
+  colonyWorkers <- extractM 0 workerCount $ setComp antComp colonyAnts
   -- Initialize 30% of workers to scouts, the rest will passively hang out at a broken home
   scouts <- extractM 0 (Sz (unSz workerCount `div` 3)) colonyWorkers
   A.forM_ scouts $ \scout -> writeIORef (antState scout) (Idle (HangingAtHome 0 (Walk 0 0)))
@@ -315,5 +317,3 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
       if ix >= 0
         then coerce emptyCell
         else ix
-
-
