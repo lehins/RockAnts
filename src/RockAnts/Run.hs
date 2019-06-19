@@ -26,8 +26,8 @@ newEnv Config {..} envLogFunc = do
   pure Env {..}
 
 
-testGridSpec :: GridSpec
-testGridSpec =
+runGridSpec :: GridSpec
+runGridSpec =
   GridSpec
     (Sz2 200 300)
     GridScale3x4
@@ -50,8 +50,8 @@ testGridSpec =
     ]
     1000
 
-testGridSpecEq :: GridSpec
-testGridSpecEq =
+runGridSpecEq :: GridSpec
+runGridSpecEq =
   GridSpec
     (Sz2 300 300)
     GridScale3x4
@@ -82,11 +82,11 @@ testGridSpecEq =
     ]
     2000
 
-testConfig :: Config
-testConfig =
+runConfig :: Config
+runConfig =
   Config
     { configSeed = (7189523021148931526, 5721129601325187147)
-    , configGridSpec = testGridSpecEq
+    , configGridSpec = runGridSpecEq
     , configWorkers = 150
     , configBrood = 20
     , configSteps = Just 3
@@ -103,8 +103,8 @@ testConfig =
     , configMaxSteps = 2000
     }
 
-runTest :: IO ()
-runTest = do
+runSimulation :: IO ()
+runSimulation = do
   logOpts <- logOptionsHandle stdout True
   withLogFunc (setLogMinLevel LevelInfo logOpts) $ \logFunc -> do
     env <- newEnv config logFunc
@@ -116,7 +116,7 @@ runTest = do
       makeVideo
       -- ffmpeg -r 24 -i output/%*0.png -s hd1080 -vcodec libx264 -pix_fmt yuv420p simulation.mp4
   where
-    config = testConfig
+    config = runConfig
     maxNumSteps = configMaxSteps config
     maxNumLen = length (show maxNumSteps)
     runModel i
