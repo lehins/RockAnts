@@ -14,54 +14,9 @@ import RIO as P
 import RockAnts.Types
 
 
-----------------------
--- GridMap creation --
-----------------------
-
-
-
-makeGridMap :: GridSpec -> Array DL Ix2 Cell
-makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
-  makeLoadArrayS gridSpecSize emptyCell $ \writeCell -> do
-    let fillWalls nw@(north :. west) se@(south :. east) =
-          let ne = north :. east
-              sw = south :. west
-           in P.mapM_
-                (A.mapM_ (`writeCell` wallCell))
-                [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
-    fillWalls 0 (unSz gridSpecSize - 1)
-    A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
-      let sw = nw + nestSz
-      fillWalls nw sw
-      A.mapM_ (`writeCell` emptyCell) (nestEntranceRange nest)
-      A.forM_ (nw + 1 ... sw - 1) (`writeCell` Cell ix)
-
-fillNests ::
-     Monad m => GridSpec -> (Ix2 -> m ()) -> (Ix2 -> m ()) -> (Cell -> Nest -> Ix2 -> m ()) -> m ()
-fillNests GridSpec {gridSpecSize, gridSpecNests} fillEmpty fillWall fillNest = do
-  let fillWalls nw@(north :. west) se@(south :. east) =
-        let ne = north :. east
-            sw = south :. west
-         in P.mapM_
-              (A.mapM_ fillWall)
-              [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
-  fillWalls 0 (unSz gridSpecSize - 1)
-  A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
-    let sw = nw + nestSz
-    fillWalls nw sw
-    A.mapM_ fillEmpty (nestEntranceRange nest)
-    A.forM_ (nw + 1 ... sw - 1) (fillNest (Cell ix) nest)
-
-makeGridImage :: GridSpec -> CellDrawer -> Image DL RGB Word8
-makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
-  makeLoadArrayS imageSize whitePx $ \writePixel -> do
-    let drawWallCell = drawCell cellDrawer (`writePixel` blackPx)
-        drawEmptyCell = drawCell cellDrawer (`writePixel` whitePx)
-    fillNests gridSpec drawEmptyCell drawWallCell (\_ _ -> drawEmptyCell)
-  where
-    imageSize = csCellSize cellDrawer * gridSpecSize - Sz (csCellOffset cellDrawer)
-    whitePx = maxBound :: Pixel RGB Word8
-    blackPx = minBound :: Pixel RGB Word8
+-------------------
+-- Grid creation --
+-------------------
 
 
 makeGrid :: GridSpec -> Grid
@@ -75,6 +30,47 @@ makeGrid gridSpec@GridSpec {gridSpecNests, gridSpecScale, gridSpecMaxSteps} =
     }
   where
     cellDrawer = getCellDrawer gridSpecScale
+
+fillWalls :: Monad m => (Ix2 -> m b) -> Ix2 -> Ix2 -> m ()
+fillWalls writeWallCell nw@(north :. west) se@(south :. east) =
+  let ne = north :. east
+      sw = south :. west
+   in P.mapM_ (A.mapM_ writeWallCell) [x ... y | (x, y) <- [(nw, ne), (ne, se), (nw, sw), (sw, se)]]
+
+
+makeGridMap :: GridSpec -> Array DL Ix2 Cell
+makeGridMap GridSpec {gridSpecSize, gridSpecNests} =
+  makeLoadArrayS gridSpecSize emptyCell $ \writeCell -> do
+    fillWalls (`writeCell` wallCell) 0 (unSz gridSpecSize - 1)
+    A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
+      let se = nw + nestSz - 1
+      fillWalls (`writeCell` wallCell) nw se
+      A.mapM_ (`writeCell` emptyCell) (nestEntranceRange nest)
+      A.mapM_ (`writeCell` Cell ix) (nestIndices nest)
+
+-- >>> :i Image
+
+makeGridImage :: GridSpec -> CellDrawer -> Image DL RGB Word8
+makeGridImage gridSpec@GridSpec {gridSpecSize} cellDrawer =
+  makeLoadArrayS imageSize whitePx $ \writePixel -> do
+    let drawWallCell = drawCell cellDrawer (`writePixel` blackPx)
+        drawEmptyCell = drawCell cellDrawer (`writePixel` whitePx)
+    fillWalls drawWallCell 0 (unSz gridSpecSize - 1)
+    fillNests gridSpec drawEmptyCell drawWallCell (\_ _ -> drawEmptyCell)
+  where
+    imageSize = csCellSize cellDrawer * gridSpecSize - Sz (csCellOffset cellDrawer)
+    whitePx = maxBound :: Pixel RGB Word8
+    blackPx = minBound :: Pixel RGB Word8
+
+fillNests ::
+     Monad m => GridSpec -> (Ix2 -> m ()) -> (Ix2 -> m ()) -> (Cell -> Nest -> Ix2 -> m ()) -> m ()
+fillNests GridSpec {gridSpecNests} fillEmpty drawWallCell fillNest =
+  A.iforM_ gridSpecNests $ \ix nest@Nest {nestNorthWest = nw, nestSize = Sz nestSz} -> do
+    let se = nw + nestSz - 1
+    fillWalls drawWallCell nw se
+    A.mapM_ fillEmpty (nestEntranceRange nest)
+    A.mapM_ (fillNest (Cell ix) nest) (nestIndices nest)
+
 
 
 -- | Fill in a 2x2 block
@@ -221,16 +217,16 @@ sampleGridSpec =
         , nestQuality = 0
         , nestNorthWest = 5 :. 2
         , nestSize = Sz (10 :. 7)
-        , nestEntranceStart = 8 :. 9
-        , nestEntranceEnd = 10 :. 9
+        , nestEntranceStart = 8 :. 8
+        , nestEntranceEnd = 10 :. 8
         }
     , Nest
         { nestIx = 1
         , nestQuality = 0.9
-        , nestNorthWest = 5 :. 19
+        , nestNorthWest = 5 :. 20
         , nestSize = Sz (10 :. 7)
-        , nestEntranceStart = 9 :. 19
-        , nestEntranceEnd = 11 :. 19
+        , nestEntranceStart = 9 :. 20
+        , nestEntranceEnd = 11 :. 20
         }
     ]
     1000

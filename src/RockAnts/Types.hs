@@ -67,8 +67,8 @@ nestEntranceRange :: Nest -> Array D Ix1 Ix2
 nestEntranceRange Nest {nestEntranceStart, nestEntranceEnd} =
   flatten (nestEntranceStart ... nestEntranceEnd)
 
-getNestIndices :: Nest -> Array D Ix2 Ix2
-getNestIndices nest = nestNorthWest nest + 1 ... nestNorthWest nest + unSz (nestSize nest) - 1
+nestIndices :: Nest -> Array D Ix2 Ix2
+nestIndices nest = nestNorthWest nest + 1 ..: nestNorthWest nest + unSz (nestSize nest) - 1
 
 type NestIx = Ix1
 
@@ -285,7 +285,7 @@ newColony genRef grid@Grid {gridMap} workerCount broodCount = do
       , A.replicate Seq queenCount Queen :: Array D Ix1 AntType
       ]
   antDiscovered <- newIORef (Set.singleton 0)
-  let homeIndices = getNestIndices (getHomeNest grid)
+  let homeIndices = nestIndices (getHomeNest grid)
       homeIndicesCorner =
         extract' 0 (Sz (liftIndex (`div` 3) (unSz (A.size homeIndices)))) homeIndices
       -- if home is smaller than number of ants, this will loop forever

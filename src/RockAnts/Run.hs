@@ -36,8 +36,8 @@ runGridSpec =
         , nestQuality = 0
         , nestNorthWest = 50 :. 20
         , nestSize = Sz (100 :. 70)
-        , nestEntranceStart = 94 :. 90
-        , nestEntranceEnd = 97 :. 90
+        , nestEntranceStart = 94 :. 89
+        , nestEntranceEnd = 97 :. 89
         }
     , Nest
         { nestIx = 1
@@ -60,8 +60,8 @@ runGridSpecEq =
         , nestQuality = 0
         , nestNorthWest = 100 :. 20
         , nestSize = Sz (100 :. 70)
-        , nestEntranceStart = 148 :. 90
-        , nestEntranceEnd = 152 :. 90
+        , nestEntranceStart = 148 :. 89
+        , nestEntranceEnd = 152 :. 89
         }
     , Nest
         { nestIx = 1
@@ -100,7 +100,7 @@ runConfig =
           , constPap = 0
           , constMaxSteps = 100
           }
-    , configMaxSteps = 2000
+    , configMaxSteps = 20000
     }
 
 runSimulation :: IO ()
@@ -114,7 +114,6 @@ runSimulation = do
       logInfo "Starting the simulation"
       runModel 0
       makeVideo
-      -- ffmpeg -r 24 -i output/%*0.png -s hd1080 -vcodec libx264 -pix_fmt yuv420p simulation.mp4
   where
     config = runConfig
     maxNumSteps = configMaxSteps config
